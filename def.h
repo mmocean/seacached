@@ -17,6 +17,7 @@
 #define BUCKET_AVERAGE_SIZE_MAX (0x10)				//default 16 (1<<4) to count bucket number
 
 
+
 //data type
 typedef unsigned int offset_t;
 typedef unsigned int uint32_t;
@@ -26,14 +27,16 @@ typedef signed int int32_t;
 struct HEADER
 {
 	int32_t version;
+	int32_t flag;			//compression or not;hash function type;bloom filter or not;
 	int32_t filter_size;
 	int32_t bucket_number;	//fixed, max bucket
 	int32_t bucket_size;	//bucket average size
 	int32_t entity_number;	//fixed, max entity
 	int32_t entity_count;	//current total entities
 	int32_t content_size;
+	int32_t file_length;
 
-	offset_t filter_offset;//bloom filter
+	offset_t filter_offset;	//bloom filter
 	offset_t bucket_offset;
 	offset_t entity_offset;
 	offset_t content_offset;
@@ -42,6 +45,7 @@ struct HEADER
 
 struct BUCKET
 {
+	int32_t entity_number;
 	int32_t first_entity;//chaining to solve a collision
 };
 
@@ -54,13 +58,11 @@ struct ENTITY
 	int32_t entity_next;
 };
 
-
-struct SEACACHED
+struct SEA_CACHED_T
 {
 	struct HEADER* header;
 	int32_t fd;
-	offset_t content;	
-	uint32_t file_length;
+	int32_t file_position;
 
 	void* mmap_base;
 	void* filter_base;//bloom filter
@@ -69,7 +71,6 @@ struct SEACACHED
 	void* content_base;
 };
 
-
 /*
 //data size
 #define HEADER_SIZE (sizeof(HEADER))
@@ -77,6 +78,18 @@ struct SEACACHED
 #define ENTITY_SIZE (sizeof(ENTITY))
 */
 
+#define SEA_CACHED_OK ((int32_t)0)
+#define SEA_CACHED_ERROR ((int32_t)-1)
+#define SEA_CACHED_KEY_EXIST ((int32_t)1)
+#define SEA_CACHED_KEY_NON_EXIST ((int32_t)2)
+
+
+struct VAR_BUF_T
+{
+	int32_t length;
+	int32_t size;
+	void* buf;
+};
 
 #endif
 

@@ -5,26 +5,58 @@
 	> Created Time: 2015-07-28
  ************************************************************************/
 
-#include<stdio.h>
-#include<stdlib.h>
-#include<string.h>
-#include"def.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+#include <sys/mman.h>
+#include <fcntl.h>//O_RDWR O_CREAT S_IRWXU open
+#include <unistd.h>//lseek close write
+#include "def.h"
 
+static int32_t 
+sea_cached_content_write( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value );
 
-int32_t hash_counting( void *key, int32_t key_length )
+static int32_t 
+sea_cached_file_open( struct SEA_CACHED_T *cached );
+
+static int32_t 
+sea_cached_file_close( struct SEA_CACHED_T *cached );
+
+static int32_t 
+dada_compression_wrapper( const struct VAR_BUF_T *key, struct VAR_BUF_T *res )
 {
-	int32_t hash_code = 0;
+	assert( NULL != key && NULL != key->buf );
+	assert( NULL != res && NULL != res->buf );
+
+	return SEA_CACHED_OK;
+}
+
+static uint32_t 
+hash_counting_wrapper( const struct VAR_BUF_T *key )
+{
+	assert( NULL != key && NULL != key->buf );
+
+	//BKDRHash
+	unsigned int seed = 131; //magic number
+	const char *str = (const char *)key->buf;
+	
+	uint32_t hash_code = 0;
+	while( '\0' != *str )
+	{
+		hash_code = hash_code*seed + (*str++);
+	}
 
 	return hash_code&0x7fffffff;
 }
 
 
-int32_t bucket_number_counting( int32_t entity_number, int32_t bucket_average_size )
+static int32_t 
+bucket_number_counting( int32_t entity_number, int32_t bucket_average_size )
 {
-	//to count the smallest prime greater than entity_size/bucket_average_size
-	if( entity_number <= 0 || bucket_average_size <= 0 )
-		return -1;
+	assert( entity_number > 0 && bucket_average_size > 0 );
 	
+	//to count the smallest prime greater than entity_size/bucket_average_size
 	int32_t bucket_number = entity_number/bucket_average_size;
 	while( ++bucket_number > 0 )
 	{
@@ -38,45 +70,30 @@ int32_t bucket_number_counting( int32_t entity_number, int32_t bucket_average_si
 			return bucket_number;
 	}
 
-	return -1;
+	return SEA_CACHED_ERROR;
 }
 
-/*
-int32_t fixed_space_counting( struct HEADER *header )
+
+static int32_t 
+offset_base_counting( struct HEADER *header )
 {
-	if( NULL == header || header->bucket_number <= 0 || header->entity_number <= 0 )
-		return -1;
-
-	int32_t fixed_space = 0;
-
-	fixed_space += sizeof( struct HEADER );
-	fixed_space += sizeof( struct BUCKET ) * header->bucket_number;
-	fixed_space += sizeof( struct ENTITY ) * header->entity_number;
-
-	fixed_space += header->filter_size;
-	
-	return fixed_space;
-}
-*/
-
-int32_t offset_base_counting( struct HEADER *header )
-{
-	if( NULL == header )
-		return -1;
+	assert( NULL != header );
 	
 	header->filter_offset = sizeof( struct HEADER );
 	header->bucket_offset = header->filter_offset + header->filter_size;
 	header->entity_offset = header->bucket_offset + sizeof(struct BUCKET) * header->bucket_number;
 	header->content_offset = header->entity_offset + sizeof(struct ENTITY) * header->entity_number;
-
+	
+	header->file_length = header->content_offset;
+	
 	return 0;
 }
 
 
-int32_t header_initial( struct HEADER *header )
+static int32_t 
+header_initial( struct HEADER *header )
 {
-	if( NULL == header )
-		return -1;
+	assert( NULL != header );
 	
 	header->version = SEA_CACHED_VERSION;
 	header->entity_number = ENTITY_SIZE_MAX;
@@ -100,16 +117,18 @@ int32_t header_initial( struct HEADER *header )
 }
 
 
-int32_t sea_cached_initial( struct SEACACHED *cached )
+static int32_t 
+sea_cached_initial( struct SEA_CACHED_T *cached )
 {
-	if( NULL == cached )
-		return -1;
+	assert( NULL != cached );
 
 	if( header_initial( cached->header ) < 0 )
 	{
 		printf( "header_initial error\n" );
 		return -1;
 	}
+
+	sea_cached_file_open( cached );
 
 	const void* mmap_base = cached->mmap_base;
 	const struct HEADER* header = cached->header;	
@@ -122,84 +141,254 @@ int32_t sea_cached_initial( struct SEACACHED *cached )
 	return 0;
 }
 
-struct ENTITY* search( const struct ENTITY *entity, const void *content, void *key, int32_t key_length, uint32_t hash_code )
+
+/*
+ * exists:SEA_CACHED_OK is returned, copy content to value 
+ * otherwise:SEA_CACHED_ERROR is returned, copy previous entity to 
+ * */
+/*
+static int32_t
+sea_cached_search( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, uint32_t hash_code, struct ENTITY *entity, struct VAR_BUF_T *value, int32_t force_cover = 0 )
 {
-	if( NULL == entity || NULL == content )
-		return NULL;
-	
-	int32_t next = 0;
-	int32_t pre = 0;
-	while( -1 != next )
+	assert( NULL != cached && NULL != cached->header );
+
+	struct ENTITY *entity_base = (struct ENTITY*)( (char*)cached->entity_base );
+	struct BUCKET *bucket_base = (struct BUCKET*)( (char*)cached->bucket_base );
+
+	int32_t bucket_index = hash_code%cached->header->bucket_number;
+
+	//search
+	int32_t entity_number = (bucket_base+bucket_index)->entity_number;
+	if( 0 == entity_number )
 	{
-		entity += next;
-		if( hash_code == entity->hash_code && ((entity->kv_size>>22)&0x400) == key_length )
-		{
-			if( 0 == memcmp( (void*)((char*)content+entity->content_index), key, key_length ) )
-				return (struct ENTITY*)entity;
-		}	
-		if( hash_code < entity->hash_code )
+		return SEA_CACHED_KEY_NON_EXIST;	
+	}
+
+	int32_t next = (bucket_base+bucket_index)->first_entity;
+	int32_t pre = next;
+	for( int i = 0; i<entity_number; ++i )
+	{
+		const struct ENTITY *tmp = entity_base+next;
+
+		if( hash_code < tmp->hash_code )
 			break;
+
+		if( hash_code == tmp->hash_code && ((tmp->kv_size>>22)&0x400) == key->size )
+		{
+			if( 0 == memcmp( (void*)((char*)content+tmp->content_index), (void*)key->buf, key->size ) )
+			{
+				if( NULL != value )
+				{
+					//to do	
+				}
+				return SEA_CACHED_KEY_EXIST;
+			}
+		}	
 
 		pre = next;
 		next = entity->entity_next;
 	}
 
-	return (struct ENTITY*)(entity+pre);
+	if( pre != next && NULL != entity )
+	{
+		memcpy( (void*)entity, (void*)(entity_base+pre), sizeof(struct ENTITY) );
+	}
+
+	return SEA_CACHED_KEY_NON_EXIST;	
 }
+*/
 
-
-int32_t set( struct SEACACHED *cached, void *key, int32_t key_length, void *value, int32_t value_length )
+static int32_t 
+sea_cached_set( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, int32_t force_cover = 0 )
 {
-	if( NULL == cached || NULL == key )
-		return -1;
+	assert( NULL != cached && NULL != cached->header );
+	assert( NULL != key && NULL != key->buf );
+	assert( NULL != value && NULL != value->buf );
 	
 	struct HEADER *header = cached->header;
-	if( NULL == header )
-		return -1;
 
 	//be full
 	if( header->entity_count > header->entity_number )
 		return -1;
 
 	//hash_counting
-	int32_t hash_code = hash_counting( key, key_length );
-	if( hash_code < 0 )
-		return -1;
+	uint32_t hash_code = hash_counting_wrapper( key );
 
 	struct ENTITY *entity_base = (struct ENTITY*)( (char*)cached->entity_base );
-	if( NULL == entity_base )
-		return -1;
-
 	struct BUCKET *bucket_base = (struct BUCKET*)( (char*)cached->bucket_base );
-	if( NULL == bucket_base )
-		return -1;
+
 	int32_t bucket_index = hash_code%header->bucket_number;
 
 	//search
-	int32_t first_entity = (bucket_base+bucket_index)->first_entity;
-	if( -1 != first_entity )
+	int32_t entity_number = (bucket_base+bucket_index)->entity_number;
+	struct ENTITY *pre = NULL;
+	if( 0 != entity_number )
 	{
-		if( NULL == search( entity_base+first_entity, (void*)( (char*)cached->content_base ), key, key_length, hash_code ) )
-			return -1;
-	} 
+		int32_t next = (bucket_base+bucket_index)->first_entity;
+		for( int i = 0; i<entity_number; ++i )
+		{
+			struct ENTITY *tmp = entity_base+next;
 
-	int32_t i = 0;
-	for( ; i<header->entity_number; ++i )
+			if( hash_code < tmp->hash_code )
+				break;
+
+			if( hash_code == tmp->hash_code && ((tmp->kv_size>>22)&0x400) == key->size )
+			{
+				if( 0 == memcmp( (void*)((char*)cached->content_base+tmp->content_index), (void*)key->buf, key->size ) )
+				{
+					return SEA_CACHED_KEY_EXIST;
+				}
+			}	
+
+			pre = tmp;
+			next = tmp->entity_next;
+		}
+
+	}
+
+	int32_t index = 0;
+	for( ; index<header->entity_number; ++index )
 	{
 		//un-used
-		if( entity_base->kv_size == 0 )
+		if( 0 == memcmp( (void*)(entity_base+index), 0, sizeof(struct ENTITY) ) )
 			break;	
 	}
-	
+
+	sea_cached_content_write( cached, key, value );
+
 	struct ENTITY entity;
 	entity.hash_code = hash_code;
-	entity.kv_size |= (key_length<<22);
-	entity.kv_size |= (value_length);
+	entity.kv_size |= (key->size<<22);
+	entity.kv_size |= (value->size);
+	entity.content_index = cached->file_position;
+	
+	if( 0 == entity_number || NULL == pre )
+	{
+		(bucket_base+bucket_index)->first_entity = index;
+		entity.entity_next = -1;
+	} else {
+		entity.entity_next = pre->entity_next;
+		pre->entity_next = index;	
+	}
+
+	memcpy( (void*)(entity_base+index), (void*)&entity, sizeof(struct ENTITY) );
+	++(bucket_base+bucket_index)->entity_number;
+	
+	cached->file_position += (key->size+value->size);
+
+	return SEA_CACHED_OK;
+}
+
+
+static int32_t 
+sea_cached_get( const struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, struct VAR_BUF_T *value )
+{
+	assert( NULL != cached );
+
+	return SEA_CACHED_OK;
+}
+
+static int32_t 
+sea_cached_delete( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key )
+{
+	assert( NULL != cached );
+
+	return SEA_CACHED_OK;
+}
+
+
+static int32_t 
+sea_cached_file_open( struct SEA_CACHED_T *cached )
+{
+	assert( NULL != cached );
+
+	int32_t fd = open( "seacached.index", O_RDWR|O_CREAT, S_IRWXU );
+	if( -1 == fd )
+	{
+		printf( "open error\n" );
+		return SEA_CACHED_ERROR;
+	}
+
+	if( -1 == lseek( fd, cached->header->file_length-1, SEEK_SET ) )
+	{
+		printf( "lseek error\n" );
+		close( fd );
+		return SEA_CACHED_ERROR;
+	}
+
+	int32_t size = write( fd, cached->header, 1 );
+
+	void *mmap_base = mmap( NULL, cached->header->file_length, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0 );
+	if( (void*)-1 == mmap_base )
+	{
+		printf( "mmap error\n" );
+		close( fd );
+		return SEA_CACHED_ERROR;
+	}
+
+	cached->fd = fd;
+	cached->mmap_base = mmap_base;
+
+	return SEA_CACHED_OK;
+}
 
 
 
 
-	return 0;
+static int32_t 
+sea_cached_file_sysnc( struct SEA_CACHED_T *cached )
+{
+	assert( NULL != cached );
+	return SEA_CACHED_OK;
+}
+
+static int32_t 
+sea_cached_file_close( struct SEA_CACHED_T *cached )
+{
+	assert( NULL != cached );
+	
+	munmap( cached->mmap_base, cached->header->file_length );
+	close( cached->fd );
+
+	return SEA_CACHED_OK;
+}
+
+
+
+static int32_t 
+sea_cached_content_extension( struct SEA_CACHED_T *cached )
+{
+	assert( NULL != cached );
+	return SEA_CACHED_OK;
+}
+
+
+static int32_t 
+sea_cached_content_write( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value )
+{
+	assert( NULL != cached );
+	
+	struct HEADER *header = cached->header;
+	if( (header->file_length-cached->file_position) < (key->size+value->size) )
+	{
+		//to do
+		sea_cached_content_extension( cached );	
+	}
+
+	memcpy( (void*)((char*)cached->mmap_base+cached->file_position), (void*)key->buf, key->size );
+	memcpy( (void*)((char*)cached->mmap_base+cached->file_position+key->size), (void*)value->buf, value->size );
+
+	return SEA_CACHED_OK;
+}
+
+
+
+
+static int32_t 
+sea_cached_capacity_extension( struct SEA_CACHED_T *cached )
+{
+	assert( NULL != cached );
+	return SEA_CACHED_OK;
 }
 
 
@@ -209,8 +398,8 @@ int main()
 	struct HEADER header;
 	memset( &header, 0, sizeof(struct HEADER) );
 	
-	struct SEACACHED cached;
-	memset( &cached, 0, sizeof(struct SEACACHED) );
+	struct SEA_CACHED_T cached;
+	memset( &cached, 0, sizeof(struct SEA_CACHED_T) );
 	cached.header = &header;
 
 	if( sea_cached_initial( &cached ) < 0 )
@@ -218,7 +407,9 @@ int main()
 		printf( "sea_cached_initial error\n" );
 		return -1;
 	}
-	
+
+	sea_cached_file_close( &cached );
+
 	return 0;
 }
 
