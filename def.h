@@ -29,6 +29,7 @@ struct HEADER
 	int32_t version;
 	int32_t flag;			//compression or not;hash function type;bloom filter or not;
 	int32_t filter_size;
+	int32_t page_size;
 	int32_t bucket_number;	//fixed, max bucket
 	int32_t bucket_size;	//bucket average size
 	int32_t entity_number;	//fixed, max entity
