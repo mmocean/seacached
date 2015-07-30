@@ -34,6 +34,7 @@ struct HEADER
 	int32_t bucket_size;	//bucket average size
 	int32_t entity_number;	//fixed, max entity
 	int32_t entity_count;	//current total entities
+	int32_t entity_incre;	
 	int32_t content_size;
 	int32_t file_length;
 
@@ -61,15 +62,16 @@ struct ENTITY
 
 struct SEA_CACHED_T
 {
-	struct HEADER* header;
+	struct HEADER *header;
+	char *file_name;
 	int32_t fd;
-	int32_t file_position;
+	int32_t content_cursor;
 
-	void* mmap_base;
-	void* filter_base;//bloom filter
-	void* bucket_base;
-	void* entity_base;
-	void* content_base;
+	void *mmap_base;
+	void *filter_base;//bloom filter
+	void *bucket_base;
+	void *entity_base;
+	void *content_base;
 };
 
 /*
@@ -84,6 +86,9 @@ struct SEA_CACHED_T
 #define SEA_CACHED_KEY_EXIST ((int32_t)1)
 #define SEA_CACHED_KEY_NON_EXIST ((int32_t)2)
 
+#define SEA_CACHED_FORCE_COVER ((int32_t)1)
+#define SEA_CACHED_SET_CALL ((int32_t)1)
+#define SEA_CACHED_GET_CALL ((int32_t)2)
 
 struct VAR_BUF_T
 {
@@ -91,6 +96,11 @@ struct VAR_BUF_T
 	int32_t size;
 	void* buf;
 };
+
+
+#define DEBUG(...)\
+printf("[DEBUG] [%d] [%s:%d] ", getpid(), __FILE__, __LINE__ );\
+printf( __VA_ARGS__ );\
 
 #endif
 
