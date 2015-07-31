@@ -20,11 +20,10 @@ static int32_t
 sea_cached_content_write( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value );
 
 static int32_t 
-sea_cached_file_open( struct SEA_CACHED_T *cached );
+sea_cached_content_extension( struct SEA_CACHED_T *cached, int32_t extend_size );
 
 static int32_t 
 sea_cached_file_close( struct SEA_CACHED_T *cached );
-
 
 static int32_t 
 sea_cached_set( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, int32_t force_cover );
@@ -177,9 +176,9 @@ sea_cached_initial( struct SEA_CACHED_T *cached )
 {
 	assert( NULL != cached );
 
-	if ( sea_cached_file_open( cached ) != SEA_CACHED_OK )
+	if ( sea_cached_content_extension( cached, 0 ) != SEA_CACHED_OK )
 	{
-		DEBUG( "sea_cached_file_open error\n" );
+		DEBUG( "sea_cached_content_extension error\n" );
 		close( cached->fd );
 		return SEA_CACHED_ERROR;
 	}
@@ -474,10 +473,18 @@ sea_cached_delete( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key )
 
 
 static int32_t 
-sea_cached_file_open( struct SEA_CACHED_T *cached )
+sea_cached_content_extension( struct SEA_CACHED_T *cached, int32_t extend_size )
 {
 	assert( NULL != cached );
 	assert( NULL != cached->file_name );
+
+	DEBUG( "sea_cached_content_extension:\n" );	
+
+	if( 0 != extend_size && SEA_CACHED_OK != sea_cached_file_close( cached ) )
+	{
+		DEBUG( "sea_cached_file_close error\n" );		
+		return SEA_CACHED_ERROR;
+	}
 
 	//S_IRWXU: 00700 user (file owner) has  read,  write  and  execute permission
 	int32_t fd = open( cached->file_name, O_RDWR|O_CREAT, S_IRWXU );
@@ -523,22 +530,24 @@ sea_cached_file_open( struct SEA_CACHED_T *cached )
 			DEBUG( "header_initial error\n" );
 			return -1;
 		}
-
-		if( -1 == lseek( fd, header.file_length-1, SEEK_SET ) )
-		{
-			DEBUG( "lseek error:%s\n", strerror(errno) );
-			return SEA_CACHED_ERROR;
-		}
-		char nil = 0;
-		ssize_t size = write( fd, (void*)&nil, sizeof(char) );
-		DEBUG( "write size:%d\n", size );
-		if( -1 == size )
-		{
-			DEBUG( "write error:%s\n", strerror(errno) );
-			return SEA_CACHED_ERROR;	
-		}
 	} else {
 		DEBUG( "file format error\n" );
+		return SEA_CACHED_ERROR;	
+	}
+	
+	header.file_length += extend_size;
+	if( -1 == lseek( fd, header.file_length-1, SEEK_SET ) )
+	{
+		DEBUG( "lseek error:%s\n", strerror(errno) );
+		return SEA_CACHED_ERROR;
+	}
+
+	char nil = 0;
+	ssize_t size = write( fd, (void*)&nil, sizeof(char) );
+	DEBUG( "write size:%d\n", size );
+	if( -1 == size )
+	{
+		DEBUG( "write error:%s\n", strerror(errno) );
 		return SEA_CACHED_ERROR;	
 	}
 
@@ -568,34 +577,34 @@ sea_cached_file_open( struct SEA_CACHED_T *cached )
 
 	cached->fd = fd;
 	cached->header = (struct HEADER*)mmap_base;
+	cached->header->file_length += extend_size;
 
 	return SEA_CACHED_OK;
 }
 
 
-
-
 static int32_t 
-sea_cached_file_sysnc( struct SEA_CACHED_T *cached )
+sea_cached_file_sysnc( struct SEA_CACHED_T *cached, int32_t flag )
 {
-	assert( NULL != cached && NULL != cached->mmap_base && NULL != cached->header );
+	assert( NULL != cached );
 
 	if( NULL != cached && NULL != cached->mmap_base && NULL != cached->header )
 	{
-		if ( -1 == msync( cached->mmap_base, cached->header->file_length, MS_ASYNC ) )
+		if ( -1 == msync( cached->mmap_base, cached->header->file_length, flag ) )
 		{
 			DEBUG( "msync error:%s\n", strerror(errno) );		
 			return SEA_CACHED_ERROR;
 		}
-		return SEA_CACHED_OK;
 	}
-	return SEA_CACHED_ERROR;
+
+	return SEA_CACHED_OK;
 }
 
+
 static int32_t 
-sea_cached_file_close( struct SEA_CACHED_T *cached )
+sea_cached_file_munmap( struct SEA_CACHED_T *cached )
 {
-	assert( NULL != cached && NULL != cached->mmap_base && NULL != cached->header );
+	assert( NULL != cached );
 
 	if( NULL != cached && NULL != cached->mmap_base && NULL != cached->header )
 	{
@@ -604,20 +613,40 @@ sea_cached_file_close( struct SEA_CACHED_T *cached )
 			DEBUG( "munmap error:%s\n", strerror(errno) );		
 			return SEA_CACHED_ERROR;
 		}
-		close( cached->fd );
-		return SEA_CACHED_OK;
 	}
 
-	return SEA_CACHED_ERROR;
+	return SEA_CACHED_OK;
 }
 
 
 static int32_t 
-sea_cached_content_extension( struct SEA_CACHED_T *cached )
+sea_cached_file_close( struct SEA_CACHED_T *cached )
 {
 	assert( NULL != cached );
 
-	DEBUG( "sea_cached_content_extension:\n" );	
+	if( NULL != cached )
+	{
+		if ( SEA_CACHED_OK != sea_cached_file_sysnc( cached, MS_SYNC ) )
+		{
+			DEBUG( "sea_cached_file_sysnc error\n" );		
+			return SEA_CACHED_ERROR;
+		}
+	
+		if ( SEA_CACHED_OK != sea_cached_file_munmap( cached ) )
+		{
+			DEBUG( "sea_cached_file_munmap error\n" );		
+			return SEA_CACHED_ERROR;
+		}
+	
+		close( cached->fd );
+		cached->fd = -1;
+
+		cached->mmap_base = NULL;
+		cached->filter_base = NULL;
+		cached->bucket_base = NULL;
+		cached->entity_base = NULL;
+		cached->content_base = NULL;
+	}
 
 	return SEA_CACHED_OK;
 }
@@ -636,7 +665,8 @@ sea_cached_content_write( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *k
 	if( (header->file_length-cached->content_cursor) < (key->size+value->size) )
 	{
 		//to do
-		if( sea_cached_content_extension( cached ) != SEA_CACHED_OK )	
+		int32_t size = CONTENT_EXTENSION_SIZE;
+		if( sea_cached_content_extension( cached, size ) != SEA_CACHED_OK )	
 		{
 			DEBUG( "sea_cached_content_extension error\n" );	
 			return SEA_CACHED_ERROR;
@@ -699,8 +729,6 @@ int main()
 		free( (void*)res.buf );
 
 	sea_cached_delete( &cached, &key );
-
-	sea_cached_file_sysnc( &cached );
 
 	sea_cached_file_close( &cached );
 
