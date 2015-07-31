@@ -101,7 +101,6 @@ struct VAR_BUF_T
 
 #define DEBUG(...)\
 printf("[DEBUG] [%d] [%s:%d] ", getpid(), __FILE__, __LINE__ );\
-printf( __VA_ARGS__ );\
-
+printf( __VA_ARGS__ );
 #endif
 

@@ -6,14 +6,17 @@
  ************************************************************************/
 
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <assert.h>
-#include <sys/mman.h>
-#include <fcntl.h>//O_RDWR O_CREAT S_IRWXU open
-#include <unistd.h>//lseek close write
-#include <sys/stat.h>
-#include <errno.h>
+#include <stdlib.h>		//malloc free
+#include <string.h>		//strerror
+#include <assert.h>		//assert
+#include <sys/mman.h>	//madvise mmap munmap msync
+#include <unistd.h>		//lseek close write sysconf read
+
+#include <sys/stat.h>	//fstat
+#include <fcntl.h>		//O_RDWR O_CREAT S_IRWXU open
+
+#include <errno.h>		//errno
+#include <sys/time.h>	//gettimeofday
 #include "def.h"
 
 static int32_t 
@@ -27,6 +30,7 @@ sea_cached_file_close( struct SEA_CACHED_T *cached );
 
 static int32_t 
 sea_cached_set( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, int32_t force_cover );
+
 
 static int32_t 
 data_compression_wrapper( const struct VAR_BUF_T *key, struct VAR_BUF_T *res )
@@ -561,6 +565,11 @@ sea_cached_content_extension( struct SEA_CACHED_T *cached, int32_t extend_size )
 		return SEA_CACHED_ERROR;
 	}
 
+	if( -1 == madvise( mmap_base, header.file_length, MADV_NORMAL ) )
+	{
+		DEBUG( "madvise error:%s\n", strerror(errno) );
+		return SEA_CACHED_ERROR;
+	}
 	cached->mmap_base = mmap_base;
 	cached->header = &header;
 	cached->content_cursor = header.content_offset + header.content_size;
@@ -717,13 +726,25 @@ int main()
 	value.buf = "ABCD";
 	value.size = strlen(value.buf);
 
+	struct timeval start;
+	gettimeofday( &start, NULL );
 	sea_cached_set( &cached, &key, &value, 0 );
+	struct timeval stop;
+	gettimeofday( &stop, NULL );
+
+	DEBUG( "%d %d \n", (int32_t)start.tv_sec, (int32_t)start.tv_usec );
+	DEBUG( "%d %d \n", (int32_t)stop.tv_sec, (int32_t)stop.tv_usec );
 
 	struct VAR_BUF_T res;
 	memset( &res, 0, sizeof(res) );
 	
+	gettimeofday( &start, NULL );
 	sea_cached_get( &cached, &key, &res );
+	gettimeofday( &stop, NULL );
 	
+	DEBUG( "%d %d \n", (int32_t)start.tv_sec, (int32_t)start.tv_usec );
+	DEBUG( "%d %d \n", (int32_t)stop.tv_sec, (int32_t)stop.tv_usec );
+
 	DEBUG( "value size:%d value:%s\n", res.size, (char*)res.buf );
 	if( NULL != res.buf )
 		free( (void*)res.buf );
