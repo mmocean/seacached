@@ -12,11 +12,11 @@
 
 #define BLOOM_FILTER_SIZE_MAX	(0x100000)	//default 1MB (1<<20)
 
-#define ENTITY_SIZE_MAX			(0x100000)				//default 1MB (1<<20)
-#define ENTITY_KEY_LENGTH_MAX	(0x400)			//default 1024B (1<<10)
-#define BUCKET_AVERAGE_SIZE_MAX (0x10)				//default 16 (1<<4) to count bucket number
+#define ENTITY_SIZE_MAX			(0x100000)	//default 1MB (1<<20)
+#define ENTITY_KEY_LENGTH_MAX	(0x400)		//default 1024B (1<<10)
+#define BUCKET_AVERAGE_SIZE_MAX (0x10)		//default 16 (1<<4) to count bucket number
 
-
+#define CONTENT_EXTENSION_SIZE	(0x200000)	//default 2MB(1<<21)
 
 //data type
 typedef unsigned int offset_t;
@@ -54,8 +54,8 @@ struct BUCKET
 
 struct ENTITY
 {
-	int32_t kv_size;	//[0...n]value,[n+1...31]key
 	uint32_t hash_code;	//order by hash_code in one bucket 
+	int32_t kv_size;	//[0...n]value,[n+1...31]key
 	offset_t content_index;
 	int32_t entity_next;
 };
@@ -81,14 +81,15 @@ struct SEA_CACHED_T
 #define ENTITY_SIZE (sizeof(ENTITY))
 */
 
-#define SEA_CACHED_OK ((int32_t)0)
-#define SEA_CACHED_ERROR ((int32_t)-1)
-#define SEA_CACHED_KEY_EXIST ((int32_t)1)
-#define SEA_CACHED_KEY_NON_EXIST ((int32_t)2)
+#define SEA_CACHED_OK				((int32_t)0)
+#define SEA_CACHED_ERROR			((int32_t)-1)
+#define SEA_CACHED_KEY_EXIST		((int32_t)1)
+#define SEA_CACHED_KEY_NON_EXIST	((int32_t)2)
 
-#define SEA_CACHED_FORCE_COVER ((int32_t)1)
-#define SEA_CACHED_SET_CALL ((int32_t)1)
-#define SEA_CACHED_GET_CALL ((int32_t)2)
+#define SEA_CACHED_FORCE_COVER		((int32_t)1)
+#define SEA_CACHED_SET_CALL			((int32_t)0x00000001)
+#define SEA_CACHED_GET_CALL			((int32_t)0x00000002)
+#define SEA_CACHED_DELETE_CALL		((int32_t)0x00000004)
 
 struct VAR_BUF_T
 {
