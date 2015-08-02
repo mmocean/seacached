@@ -10,76 +10,82 @@
 
 #define SEA_CACHED_VERSION (1)
 
-#define BLOOM_FILTER_SIZE_MAX	(0x100000)	//default 1MB (1<<20)
-
-#define ENTITY_SIZE_MAX			(0x100000)	//default 1MB (1<<20)
-#define ENTITY_KEY_LENGTH_MAX	(0x400)		//default 1024B (1<<10)
-#define BUCKET_AVERAGE_SIZE_MAX (0x10)		//default 16 (1<<4) to count bucket number
-
-#define CONTENT_EXTENSION_SIZE	(0x200000)	//default 2MB(1<<21)
+#define BUCKET_SIZE_MAX			(8)			//default 8
+#define ENTRY_KEY_LENGTH_MAX	(1024)		//default 1024B 
+#define PAGE_RATE_INCRE			(1)
 
 //data type
 typedef unsigned int offset_t;
 typedef unsigned int uint32_t;
 typedef signed int int32_t;
 
+
+struct FILE_INFO_T
+{
+	#define SEA_CACHED_FILENAME_MAX (255)
+	char name[SEA_CACHED_FILENAME_MAX];
+	int32_t page_rate_incre;
+	uint32_t cursor;	
+	uint32_t length;
+};
+
 //core data type definitions
-struct HEADER
+struct HEADER_INFO_T
 {
 	int32_t version;
 	int32_t flag;			//compression or not;hash function type;bloom filter or not;
-	int32_t filter_size;
 	int32_t page_size;
-	int32_t bucket_number;	//fixed, max bucket
-	int32_t bucket_size;	//bucket average size
-	int32_t entity_number;	//fixed, max entity
-	int32_t entity_count;	//current total entities
 	int32_t entity_incre;	
 	int32_t content_size;
 	int32_t file_length;
 
-	offset_t filter_offset;	//bloom filter
-	offset_t bucket_offset;
-	offset_t entity_offset;
-	offset_t content_offset;
+	int32_t bucket_size;	//bucket average size
+	
+	uint32_t catalog_count;	//current total catalogs
+	uint32_t entry_count;	//current total entities
+	uint32_t entry_idle;
+	uint32_t entry_sequence;
+	
+	uint32_t depth;			//global depth 
+
+	FILE_INFO_T catalog;
+	FILE_INFO_T entry;
+	FILE_INFO_T data;
 };
 
 
-struct BUCKET
+struct CATALOG_INFO_T
+{	
+	uint32_t depth_and_count;	//[0...n]count of entry,[n+1...31]locale depth of bucket
+	int32_t entry_first;		//chaining to solve a collision
+};
+
+
+struct ENTRY_INFO_T
 {
-	int32_t entity_number;
-	int32_t first_entity;//chaining to solve a collision
+	uint32_t hash_code;			//order by hash_code in one bucket 
+	uint32_t data_offset;
+	int32_t key_value_size;		//[0...n]value,[n+1...31]key
+	int32_t entry_next;
 };
 
 
-struct ENTITY
+struct MMAP_INFO_T
 {
-	uint32_t hash_code;	//order by hash_code in one bucket 
-	int32_t kv_size;	//[0...n]value,[n+1...31]key
-	offset_t content_index;
-	int32_t entity_next;
+	void *base;					//the returned addr when invoke mmap()
+	int32_t fd;					//invoke open()
+	FILE_INFO_T file;
 };
+
 
 struct SEA_CACHED_T
 {
-	struct HEADER *header;
-	char *file_name;
-	int32_t fd;
-	int32_t content_cursor;
-
-	void *mmap_base;
-	void *filter_base;//bloom filter
-	void *bucket_base;
-	void *entity_base;
-	void *content_base;
+	struct HEADER_INFO_T *header;
+	struct MMAP_INFO_T *catalog;
+	struct MMAP_INFO_T *entry;
+	struct MMAP_INFO_T *data;	
 };
 
-/*
-//data size
-#define HEADER_SIZE (sizeof(HEADER))
-#define BUCKET_SIZE (sizeof(BUCKET))
-#define ENTITY_SIZE (sizeof(ENTITY))
-*/
 
 #define SEA_CACHED_OK				((int32_t)0)
 #define SEA_CACHED_ERROR			((int32_t)-1)
