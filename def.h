@@ -62,9 +62,9 @@ struct HEADER_INFO_T
 	uint32_t entry_count;	//current total entities
 	uint32_t entry_sequence;
 
-	FILE_INFO_T catalog;
-	FILE_INFO_T entry;
-	FILE_INFO_T data;
+	struct FILE_INFO_T catalog;
+	struct FILE_INFO_T entry;
+	struct FILE_INFO_T data;
 };
 
 struct MMAP_INFO_T
@@ -101,7 +101,8 @@ struct SEA_CACHED_T
 #define SEA_CACHED_PAGE_ALIGN		((int32_t)0x00000001)
 
 #define SEA_CACHED_FILE_MMAP		((int32_t)0x00000001)
-#define SEA_CACHED_FILE_MMAP_EXTEND	((int32_t)0x00000002)
+#define SEA_CACHED_FILE_MMAP		((int32_t)0x00000001)
+#define SEA_CACHED_HASHTABLE_UNUSED ((int32_t)0x00000000)
 
 #define SEA_CACHED_CATALOG_SUFFIX	(".catalog")
 #define SEA_CACHED_ENTRY_SUFFIX		(".entry")

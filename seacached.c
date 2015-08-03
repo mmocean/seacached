@@ -20,14 +20,10 @@
 #include "def.h"
 
 static int32_t 
-sea_cached_content_write( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value );
+sea_cached_file_extension( struct FILE_INFO_T *file, struct MMAP_INFO_T *map );
 
 static int32_t 
-sea_cached_content_extension( struct SEA_CACHED_T *cached, int32_t extend_size );
-
-static int32_t 
-sea_cached_file_close( struct SEA_CACHED_T *cached );
-
+sea_cached_file_mmap( struct FILE_INFO_T *file, struct MMAP_INFO_T *map );
 
 static int32_t 
 data_compression_wrapper( const struct VAR_BUF_T *key, struct VAR_BUF_T *res )
@@ -87,22 +83,47 @@ dump_header_info( struct HEADER_INFO_T *header )
 	
 	char buf[512];
 	memset( buf, 0, sizeof(buf) );
+	int32_t size = 0;
 
-	snprintf( buf, sizeof(buf), 
-		"%s: %s\n %s: %d\n %s: %d\n %s: %d\n "
-		"%s: %d\n %s: %d\n %s: %d\n %s: %d\n ",
+	size += snprintf( buf, sizeof(buf), 
+		"%s: %s\n %s: %u\n %s: %u\n %s: %u\n "
+		"%s: %u\n %s: %u\n %s: %u\n %s: %u\n ",
 		"table_name:", header->table_name,
 		"flag", header->flag,
 		"version", header->version,
 		"bucket_size", header->bucket_size,
 		"catalog_count", header->catalog_count,
-		"catalog_depth", header->catalog_depth	
+		"catalog_depth", header->catalog_depth,	
 		"entry_count", header->entry_count,	
 		"entry_sequence", header->entry_sequence );
-	
+
+	size += snprintf( buf+size, sizeof(buf)-size, 
+		"%s\n %s: %s\n %s: %u\n %s: %u\n %s: %u\n ",
+		"# catalog #",
+		"name", header->catalog.name,
+		"cursor", header->catalog.cursor,
+		"length", header->catalog.length,
+		"align_size", header->catalog.align_size );
+	size += snprintf( buf+size, sizeof(buf)-size, 
+		"%s\n %s: %s\n %s: %u\n %s: %u\n %s: %u\n ",
+		"# entry #",
+		"name", header->catalog.name,
+		"cursor", header->catalog.cursor,
+		"length", header->catalog.length,
+		"align_size", header->catalog.align_size );
+	size += snprintf( buf+size, sizeof(buf)-size, 
+		"%s\n %s: %s\n %s: %u\n %s: %u\n %s: %u\n ",
+		"# data #",
+		"name", header->catalog.name,
+		"cursor", header->catalog.cursor,
+		"length", header->catalog.length,
+		"align_size", header->catalog.align_size );
+
 	DEBUG( "dump_header_info:\n %s\n", buf );
 }
 
+
+/*
 static void
 offset_counting( struct HEADER *header )
 {
@@ -161,12 +182,14 @@ header_initial( struct HEADER *header )
 	
 	return SEA_CACHED_OK;
 }
-
+*/
 
 static int32_t 
 sea_cached_initial( struct SEA_CACHED_T *cached )
 {
 	assert( NULL != cached );
+	
+	DEBUG( "sea_cached_initial:\n" );	
 	
 	struct FILE_INFO_T *file = cached->file;
 	struct MMAP_INFO_T *mmap = cached->mmap;
@@ -201,11 +224,13 @@ sea_cached_initial( struct SEA_CACHED_T *cached )
 }
 
 
-struct HASH_TABLE_T*
+static struct HASH_TABLE_T*
 sea_cached_hash_table_seach( struct HASH_TABLE_T *hash_table, const char *table_name, int32_t size )
 {
-	assert( NULL != hash_table && NULL != table_name );
-	
+	assert( NULL != table_name );
+
+	DEBUG( "sea_cached_hash_table_seach:\n" );
+
 	while( NULL != hash_table )
 	{
 		struct HEADER_INFO_T *header = (struct HEADER_INFO_T *)hash_table->header;
@@ -218,21 +243,48 @@ sea_cached_hash_table_seach( struct HASH_TABLE_T *hash_table, const char *table_
 }
 
 
-struct HASH_TABLE_T*
+static struct HASH_TABLE_T*
 hash_table_create( struct SEA_CACHED_T *cached, const char *table_name, uint32_t bucket_size )
 {
 	assert( NULL != cached && NULL != cached->file && NULL != cached->mmap && NULL != table_name );
 	
-	if( SEA_CACHED_OK != sea_cached_file_extension( cached->file, cached->mmap ) )
+	DEBUG( "hash_table_create:\n" );
+
+	struct HASH_TABLE_T *hash_table = cached->hash_table;
+	while( NULL != hash_table )
 	{
-		DEBUG( "sea_cached_file_extension error\n" );
-		return NULL;
+		struct HEADER_INFO_T *header = (struct HEADER_INFO_T *)hash_table->header;
+		if( SEA_CACHED_HASHTABLE_UNUSED == (header->flag|SEA_CACHED_HASHTABLE_UNUSED) )
+			break;
+		hash_table = hash_table->next;
 	}
 
-	struct HEADER_INFO_T *header = (struct HEADER_INFO_T *)mmap->base + (cached->file.length/cached->file.align_size-1);	
+	struct HEADER_INFO_T *header = NULL;
+	if( NULL == hash_table )
+	{
+		if( SEA_CACHED_OK != sea_cached_file_extension( cached->file, cached->mmap ) )
+		{
+			DEBUG( "sea_cached_file_extension error\n" );
+			return NULL;
+		}
+		header = (struct HEADER_INFO_T *)( cached->mmap->base + (cached->file->length/cached->file->align_size-1) );
+	} else {
+		header = (struct HEADER_INFO_T *)hash_table->header;
+	}
+
 	memset( header, 0, sizeof(struct HEADER_INFO_T) );		
 	strncpy( header->table_name, table_name, sizeof(header->table_name) );
 	header->bucket_size = bucket_size;
+
+	struct FILE_INFO_T *catalog = &header->catalog;
+	struct FILE_INFO_T *entry = &header->entry;
+	struct FILE_INFO_T *data = &header->data;	
+	
+	snprintf( catalog->name, sizeof(catalog->name), "%s%s", table_name, SEA_CACHED_CATALOG_SUFFIX );
+	snprintf( entry->name, sizeof(entry->name), "%s%s", table_name, SEA_CACHED_ENTRY_SUFFIX );
+	snprintf( data->name, sizeof(data->name), "%s%s", table_name, SEA_CACHED_DATA_SUFFIX );
+
+	catalog->align_size = entry->align_size = data->align_size = sysconf(_SC_PAGESIZE);
 
 	struct HASH_TABLE_T *tmp = (struct HASH_TABLE_T*)malloc(sizeof(struct HASH_TABLE_T));
 	if( NULL == tmp )
@@ -245,7 +297,7 @@ hash_table_create( struct SEA_CACHED_T *cached, const char *table_name, uint32_t
 		tmp->next = NULL;
 		cached->hash_table = tmp;
 	} else {
-		tmp->next = cached.hash_table;
+		tmp->next = cached->hash_table;
 		cached->hash_table = tmp;		
 	}		
 
@@ -253,21 +305,17 @@ hash_table_create( struct SEA_CACHED_T *cached, const char *table_name, uint32_t
 }
 
 static int32_t 
-hash_table_initial( struct HASH_TABLE_T *hash_table, const char *table_name, uint32_t bucket_size )
+hash_table_initial( struct HASH_TABLE_T *hash_table )
 {
-	assert( NULL != hash_table && NULL != table_name );
+	assert( NULL != hash_table && NULL != hash_table->header );
+	
+	DEBUG( "hash_table_initial:\n" );
 	
 	struct HEADER_INFO_T *header = hash_table->header;
 
 	struct FILE_INFO_T *catalog = &header->catalog;
 	struct FILE_INFO_T *entry = &header->entry;
 	struct FILE_INFO_T *data = &header->data;
-	
-	snprintf( catalog->name, sizeof(catalog->name), "%s.%s", table_name, SEA_CACHED_CATALOG_SUFFIX );
-	snprintf( entry->name, sizeof(entry->name), "%s.%s", table_name, SEA_CACHED_ENTRY_SUFFIX );
-	snprintf( data->name, sizeof(data->name), "%s.%s", table_name, SEA_CACHED_DATA_SUFFIX );
-
-	catalog->align_size = entry->align_size = data->align_size = sysconf(_SC_PAGESIZE);
 
 	if( SEA_CACHED_OK != sea_cached_file_mmap( catalog, &hash_table->catalog ) )
 	{
@@ -296,6 +344,7 @@ hash_table_initial( struct HASH_TABLE_T *hash_table, const char *table_name, uin
  * otherwise:SEA_CACHED_ERROR is returned, copy previous entity to 
  * */
 
+/*
 static int32_t
 sea_cached_search( const struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, uint32_t hash_code, int32_t entity_number, int32_t bucket_index, int32_t force_cover, int32_t call_flag, struct ENTITY **entity )
 {
@@ -362,6 +411,8 @@ available_entity_search( const struct ENTITY *entity_base, int32_t entity_number
 	return SEA_CACHED_ERROR;
 }
 
+*/
+
 static int32_t 
 hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, int32_t force_cover )
 {
@@ -372,11 +423,17 @@ hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, co
 	DEBUG( "hash_table_set:\n" );
 
 	struct HEADER_INFO_T *header = hash_table->header;
+	dump_header_info( header );
 
 	struct MMAP_INFO_T *catalog = &hash_table->catalog;
 	struct MMAP_INFO_T *entry = &hash_table->entry;
 	struct MMAP_INFO_T *data = &hash_table->data;
-	
+
+	//hash_counting
+	uint32_t hash_code = hash_counting_wrapper( key );
+	DEBUG( "hash_code:%u\n", hash_code );
+
+	/*
 	//be full
 	DEBUG( "header->entity_count:%d\n", header->entity_count );
 	if( header->entity_count > header->entity_number )
@@ -384,10 +441,7 @@ hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, co
 		return SEA_CACHED_ERROR;
 	}
 
-	//hash_counting
-	uint32_t hash_code = hash_counting_wrapper( key );
-	DEBUG( "hash_code:%u\n", hash_code );
-
+	
 	int32_t bucket_index = hash_code%header->bucket_number;
 	DEBUG( "bucket_index:%d\n", bucket_index );
 
@@ -457,11 +511,11 @@ hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, co
 	cached->content_cursor += (key->size+value->size);
 
 	DEBUG( "hash_table_set OK\n" );
-	
+	*/	
 	return SEA_CACHED_OK;
 }
 
-
+/*
 static int32_t 
 hash_table_get( const struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, struct VAR_BUF_T *value )
 {
@@ -578,22 +632,23 @@ sea_cached_delete( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key )
 	DEBUG( "sea_cached_delete OK\n" );
 	return SEA_CACHED_OK;
 }
+*/
 
 static int32_t 
-sea_cached_file_extension( struct FILE_INFO_T *file, struct MMAP_INFO_T *mmap )
+sea_cached_file_extension( struct FILE_INFO_T *file, struct MMAP_INFO_T *map )
 {
-	assert( NULL != file && NULL != mmap );
+	assert( NULL != file && NULL != map );
 
-	length = (file->length/file->align_size+1)*file->align_size;
+	uint32_t length = (file->length/file->align_size+1)*file->align_size;
 
-	if( -1 == lseek( mmap->fd, length-1, SEEK_SET ) )
+	if( -1 == lseek( map->fd, length-1, SEEK_SET ) )
 	{
 		DEBUG( "lseek error:%s\n", strerror(errno) );
 		return SEA_CACHED_ERROR;
 	}
 
 	char nil = 0;
-	int32_t size = write( mmap->fd, (void*)&nil, sizeof(char) );
+	int32_t size = write( map->fd, (void*)&nil, sizeof(char) );
 	DEBUG( "write size:%d\n", size );
 	if( -1 == size )
 	{
@@ -602,7 +657,7 @@ sea_cached_file_extension( struct FILE_INFO_T *file, struct MMAP_INFO_T *mmap )
 	}
 
 	off_t off = 0;
-	void *base = (void*)mmap( NULL, length, PROT_READ|PROT_WRITE, MAP_SHARED, mmap->fd, off );
+	void *base = (void*)mmap( NULL, length, PROT_READ|PROT_WRITE, MAP_SHARED, map->fd, off );
 	if( MAP_FAILED == base )
 	{
 		DEBUG( "mmap error:%s\n", strerror(errno) );
@@ -615,31 +670,31 @@ sea_cached_file_extension( struct FILE_INFO_T *file, struct MMAP_INFO_T *mmap )
 		return SEA_CACHED_ERROR;
 	}
 
-	if( NULL != mmap->base )
+	if( NULL != map->base )
 	{	
-		if ( -1 == msync( mmap->base, file->length, MS_SYNC ) )
+		if ( -1 == msync( map->base, file->length, MS_SYNC ) )
 		{
 			DEBUG( "msync error:%s\n", strerror(errno) );		
 			return SEA_CACHED_ERROR;
 		}
 		
-		if( -1 == munmap( mmap->base, file->length ) )
+		if( -1 == munmap( map->base, file->length ) )
 		{
 			DEBUG( "munmap error:%s\n", strerror(errno) );		
 			return SEA_CACHED_ERROR;
 		}
 	}
 
-	mmap->base = base;
+	map->base = base;
 	file->length = length;
 
 	return SEA_CACHED_OK;
 }
 
 static int32_t 
-sea_cached_file_mmap( struct FILE_INFO_T *file, struct MMAP_INFO_T *mmap )
+sea_cached_file_mmap( struct FILE_INFO_T *file, struct MMAP_INFO_T *map )
 {
-	assert( NULL != file && NULL != mmap );
+	assert( NULL != file && NULL != map );
 
 	DEBUG( "sea_cached_file_mmap:\n" );	
 
@@ -659,11 +714,27 @@ sea_cached_file_mmap( struct FILE_INFO_T *file, struct MMAP_INFO_T *mmap )
 	}
 	DEBUG( "filesize:%d\n", (int)st.st_size );
 
-	if( file->length != (int)st.st_size )
+	if( 0 == st.st_size )
 	{
-		DEBUG( "file length does not match\n" );
-		return SEA_CACHED_ERROR;
+		if( -1 == lseek( fd, file->align_size-1, SEEK_SET ) )
+		{
+			DEBUG( "lseek error:%s\n", strerror(errno) );
+			return SEA_CACHED_ERROR;
+		}
+
+		char nil = 0;
+		int32_t size = write( fd, (void*)&nil, sizeof(char) );
+		DEBUG( "write size:%d\n", size );
+		if( -1 == size )
+		{
+			DEBUG( "write error:%s\n", strerror(errno) );
+			return SEA_CACHED_ERROR;	
+		}
+		file->length = file->align_size;
+	} else {
+		file->length = st.st_size;
 	}
+
 
 	off_t off = 0;
 	void *base = (void*)mmap( NULL, file->length, PROT_READ|PROT_WRITE, MAP_SHARED, fd, off );
@@ -673,19 +744,19 @@ sea_cached_file_mmap( struct FILE_INFO_T *file, struct MMAP_INFO_T *mmap )
 		return SEA_CACHED_ERROR;
 	}
 
-	if( -1 == madvise( base, file->file_length, MADV_NORMAL ) )
+	if( -1 == madvise( base, file->length, MADV_NORMAL ) )
 	{
 		DEBUG( "madvise error:%s\n", strerror(errno) );
 		return SEA_CACHED_ERROR;
 	}
 
-	mmap->base = base;
-	mmap->fd = fd;
+	map->base = base;
+	map->fd = fd;
 
 	return SEA_CACHED_OK;
 }
 
-
+/*
 static int32_t 
 sea_cached_file_close( struct SEA_CACHED_T *cached )
 {
@@ -769,7 +840,7 @@ sea_cached_capacity_extension( struct SEA_CACHED_T *cached )
 
 	return SEA_CACHED_OK;
 }
-
+*/
 
 int main()
 {
@@ -777,7 +848,7 @@ int main()
 	struct FILE_INFO_T file;
 	memset( &file, 0, sizeof(struct FILE_INFO_T) );
 	file.align_size = sizeof(struct HEADER_INFO_T);	
-	strncpy( &file.name, "cache.cache", sizeof(file.name) );
+	strncpy( file.name, "./test/cache.cache", sizeof(file.name) );
 
 	struct MMAP_INFO_T mmap;
 	memset( &mmap, 0, sizeof(struct MMAP_INFO_T) );
@@ -793,7 +864,7 @@ int main()
 	}
 
 	//hash_table_initial
-	const char *table_name = "test";
+	const char *table_name = "./test/test";
 	struct HASH_TABLE_T *hash_table = sea_cached_hash_table_seach( cached.hash_table, table_name, strlen(table_name) );	
 	uint32_t bucket_size = BUCKET_SIZE_MAX;
 	if ( NULL == hash_table && NULL == (hash_table = hash_table_create( &cached ,table_name, bucket_size ) ) )
@@ -801,7 +872,7 @@ int main()
 		DEBUG( "hash_table_create error\n" );
 	}
 
-	if( SEA_CACHED_OK != hash_table_initial( hash_table, table_name ) )
+	if( SEA_CACHED_OK != hash_table_initial( hash_table ) )
 	{
 		DEBUG( "hash_table_initial error\n" );
 	}
@@ -817,13 +888,14 @@ int main()
 
 	struct timeval start;
 	gettimeofday( &start, NULL );
-	hash_table_set( &cached, &key, &value, 0 );
+	hash_table_set( hash_table, &key, &value, 0 );
 	struct timeval stop;
 	gettimeofday( &stop, NULL );
 
 	DEBUG( "%d %d \n", (int32_t)start.tv_sec, (int32_t)start.tv_usec );
 	DEBUG( "%d %d \n", (int32_t)stop.tv_sec, (int32_t)stop.tv_usec );
 
+	/*
 	struct VAR_BUF_T res;
 	memset( &res, 0, sizeof(res) );
 	
@@ -841,6 +913,7 @@ int main()
 	sea_cached_delete( &cached, &key );
 
 	sea_cached_file_close( &cached );
+	*/
 
 	return 0;
 }
