@@ -19,47 +19,19 @@ typedef unsigned int offset_t;
 typedef unsigned int uint32_t;
 typedef signed int int32_t;
 
-
-struct FILE_INFO_T
+struct VAR_BUF_T
 {
-	#define SEA_CACHED_FILENAME_MAX (255)
-	char name[SEA_CACHED_FILENAME_MAX];
-	int32_t page_rate_incre;
-	uint32_t cursor;	
-	uint32_t length;
+	int32_t length;
+	int32_t size;
+	void* buf;
 };
 
 //core data type definitions
-struct HEADER_INFO_T
-{
-	int32_t version;
-	int32_t flag;			//compression or not;hash function type;bloom filter or not;
-	int32_t page_size;
-	int32_t entity_incre;	
-	int32_t content_size;
-	int32_t file_length;
-
-	int32_t bucket_size;	//bucket average size
-	
-	uint32_t catalog_count;	//current total catalogs
-	uint32_t entry_count;	//current total entities
-	uint32_t entry_idle;
-	uint32_t entry_sequence;
-	
-	uint32_t depth;			//global depth 
-
-	FILE_INFO_T catalog;
-	FILE_INFO_T entry;
-	FILE_INFO_T data;
-};
-
-
 struct CATALOG_INFO_T
 {	
 	uint32_t depth_and_count;	//[0...n]count of entry,[n+1...31]locale depth of bucket
-	int32_t entry_first;		//chaining to solve a collision
+	uint32_t entry_first;		//chaining to solve a collision
 };
-
 
 struct ENTRY_INFO_T
 {
@@ -69,23 +41,53 @@ struct ENTRY_INFO_T
 	int32_t entry_next;
 };
 
+struct FILE_INFO_T
+{
+	#define SEA_CACHED_FILENAME_MAX (255)
+	char name[SEA_CACHED_FILENAME_MAX];
+	uint32_t cursor;	
+	uint32_t length;
+	int32_t align_size;
+};
+
+struct HEADER_INFO_T
+{
+	#define SEA_CACHED_TABLENAME_MAX (32)
+	char table_name[SEA_CACHED_TABLENAME_MAX];
+	uint32_t bucket_size;	//bucket average size	
+	uint32_t flag;			//compression;hash function type;bloom filter;align 
+	uint32_t version;	
+	uint32_t catalog_count;	//current total catalogs
+	uint32_t catalog_depth;	//global depth 	
+	uint32_t entry_count;	//current total entities
+	uint32_t entry_sequence;
+
+	FILE_INFO_T catalog;
+	FILE_INFO_T entry;
+	FILE_INFO_T data;
+};
 
 struct MMAP_INFO_T
 {
 	void *base;					//the returned addr when invoke mmap()
 	int32_t fd;					//invoke open()
-	FILE_INFO_T file;
 };
 
+struct HASH_TABLE_T
+{
+	struct HEADER_INFO_T *header;	
+	struct MMAP_INFO_T catalog;
+	struct MMAP_INFO_T entry;
+	struct MMAP_INFO_T data;	
+	struct HASH_TABLE_T *next;
+};
 
 struct SEA_CACHED_T
 {
-	struct HEADER_INFO_T *header;
-	struct MMAP_INFO_T *catalog;
-	struct MMAP_INFO_T *entry;
-	struct MMAP_INFO_T *data;	
+	struct FILE_INFO_T *file;
+	struct MMAP_INFO_T *mmap;
+	struct HASH_TABLE_T *hash_table;
 };
-
 
 #define SEA_CACHED_OK				((int32_t)0)
 #define SEA_CACHED_ERROR			((int32_t)-1)
@@ -96,14 +98,14 @@ struct SEA_CACHED_T
 #define SEA_CACHED_SET_CALL			((int32_t)0x00000001)
 #define SEA_CACHED_GET_CALL			((int32_t)0x00000002)
 #define SEA_CACHED_DELETE_CALL		((int32_t)0x00000004)
+#define SEA_CACHED_PAGE_ALIGN		((int32_t)0x00000001)
 
-struct VAR_BUF_T
-{
-	int32_t length;
-	int32_t size;
-	void* buf;
-};
+#define SEA_CACHED_FILE_MMAP		((int32_t)0x00000001)
+#define SEA_CACHED_FILE_MMAP_EXTEND	((int32_t)0x00000002)
 
+#define SEA_CACHED_CATALOG_SUFFIX	(".catalog")
+#define SEA_CACHED_ENTRY_SUFFIX		(".entry")
+#define SEA_CACHED_DATA_SUFFIX		(".data")
 
 #define DEBUG(...)\
 printf("[DEBUG] [%d] [%s:%d] ", getpid(), __FILE__, __LINE__ );\
