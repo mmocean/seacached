@@ -8,13 +8,6 @@
 #ifndef _DEF_H
 #define _DEF_H
 
-#define SEA_CACHED_VERSION		(1)
-/*default 8*/
-#define BUCKET_SIZE_MAX			(8)			
-/*default 1024B*/
-#define ENTRY_KEY_LENGTH_MAX	(1024)
-#define PAGE_RATE_INCRE			(1)
-
 /*data type*/
 typedef unsigned int offset_t;
 typedef unsigned int uint32_t;
@@ -31,7 +24,7 @@ struct VAR_BUF_T
 struct CATALOG_INFO_T
 {	
 	uint32_t depth_and_count;	/*[0...n]count of entry,[n+1...31]locale depth of bucket*/
-	uint32_t entry_first;		/*chaining to solve a collision*/
+	int32_t entry_first;		/*chaining to solve a collision*/
 };
 
 struct ENTRY_INFO_T
@@ -94,20 +87,23 @@ struct SEA_CACHED_T
 	struct HASH_TABLE_T *hash_table;
 };
 
-#define SEA_CACHED_OK				((int32_t)0)
+#define SEA_CACHED_OK				((int32_t) 0)
 #define SEA_CACHED_ERROR			((int32_t)-1)
-#define SEA_CACHED_KEY_EXIST		((int32_t)1)
-#define SEA_CACHED_KEY_NON_EXIST	((int32_t)2)
 
-#define SEA_CACHED_FORCE_COVER		((int32_t)1)
+#define SEA_CACHED_VERSION			((uint32_t)1)
+#define SEA_CACHED_BUCKET_SIZE		((int32_t) 8)	/*default 8*/
+#define SEA_CACHED_CATALOG_MULTIPLE	((int32_t) 1)	/*default 8*/
+
 #define SEA_CACHED_SET_CALL			((int32_t)0x00000001)
 #define SEA_CACHED_GET_CALL			((int32_t)0x00000002)
 #define SEA_CACHED_DELETE_CALL		((int32_t)0x00000004)
-#define SEA_CACHED_PAGE_ALIGN		((int32_t)0x00000001)
+#define SEA_CACHED_UPDATE_CALL		((int32_t)0x00000008)
 
-#define SEA_CACHED_FILE_MMAP		((int32_t)0x00000001)
-#define SEA_CACHED_FILE_MMAP		((int32_t)0x00000001)
+#define SEA_CACHED_KEY_EXIST		((int32_t)0x00000001)
+#define SEA_CACHED_KEY_NON_EXIST	((int32_t)0x00000002)
+
 #define SEA_CACHED_HASHTABLE_UNUSED ((int32_t)0x00000000)
+#define SEA_CACHED_HASHTABLE_USED	((int32_t)0x00000001)
 
 #define SEA_CACHED_CATALOG_SUFFIX	(".catalog")
 #define SEA_CACHED_ENTRY_SUFFIX		(".entry")
@@ -117,5 +113,4 @@ struct SEA_CACHED_T
 printf("[DEBUG] [%d] [%s:%d] ", getpid(), __FILE__, __LINE__ );\
 printf( __VA_ARGS__ );
 #endif
-
 

@@ -26,13 +26,15 @@ static int32_t
 sea_cached_file_mmap( struct FILE_INFO_T *file, struct MMAP_INFO_T *map );
 
 static int32_t 
-hash_table_data_write( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, int32_t (*compression)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) );
+hash_table_data_write( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, int32_t (*compression_callback)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) );
 
 static int32_t 
-data_compression( const struct VAR_BUF_T *key, struct VAR_BUF_T *res )
+hash_table_data_compression( const struct VAR_BUF_T *key, struct VAR_BUF_T *res )
 {
 	assert( NULL != key && NULL != key->buf );
 	assert( NULL != res && NULL != res->buf );
+	
+	DEBUG( "hash_table_data_compression:\n" );
 
 	return SEA_CACHED_OK;
 }
@@ -41,6 +43,8 @@ static uint32_t
 hash_calculating( const struct VAR_BUF_T *key )
 {
 	assert( NULL != key && NULL != key->buf );
+	
+	DEBUG( "hash_calculating:\n" );
 
 	//BKDRHash
 	//magic number
@@ -260,6 +264,7 @@ hash_table_create( struct SEA_CACHED_T *cached, const char *table_name, uint32_t
 	memset( header, 0, sizeof(struct HEADER_INFO_T) );		
 	strncpy( header->table_name, table_name, sizeof(header->table_name) );
 	header->bucket_size = bucket_size;
+	header->version	= SEA_CACHED_VERSION;	
 
 	struct FILE_INFO_T *catalog = &header->catalog;
 	struct FILE_INFO_T *entry = &header->entry;
@@ -323,7 +328,8 @@ hash_table_initial( struct HASH_TABLE_T *hash_table )
 		return SEA_CACHED_ERROR;
 	}
 
-	
+	header->flag |= SEA_CACHED_HASHTABLE_USED;
+
 	return SEA_CACHED_OK;
 }
 
@@ -335,8 +341,8 @@ hash_table_initial( struct HASH_TABLE_T *hash_table )
 
 
 static int32_t
-hash_table_search( const struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, uint32_t hash_code, 
-				int32_t entry_first, int32_t force_cover, int32_t call_flag, const struct ENTRY_INFO_T **entry )
+hash_table_search( const struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, 
+				uint32_t hash_code, int32_t entry_first, const struct ENTRY_INFO_T **entry )
 {
 	assert( NULL != hash_table && NULL != entry );
 	assert( NULL != key && NULL != key->buf );
@@ -359,12 +365,7 @@ hash_table_search( const struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T
 			if( 0 == memcmp( (void*)((char*)data->base+iter->data_offset), (void*)key->buf, key->size ) )
 			{
 				DEBUG( "key already exists\n" );
-				if( SEA_CACHED_SET_CALL == call_flag && SEA_CACHED_FORCE_COVER != force_cover )
-				{
-					*entry = pre;	
-				} else {
-					*entry = iter;						
-				}
+				*entry = iter;						
 				return SEA_CACHED_KEY_EXIST;
 			}
 		}	
@@ -373,43 +374,74 @@ hash_table_search( const struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T
 	}
 
 	*entry = pre;							
-	DEBUG( "nonexistence key\n" );
+	DEBUG( "key does not exist\n" );
 
 	return SEA_CACHED_KEY_NON_EXIST;	
 }
 
-/*
-static int32_t 
-available_entry_search( const struct ENTITY *entity_base, int32_t entity_number )
-{
-	assert( NULL != entity_base );
 
-	int32_t index = 0;
-	for( index = 0; index<entity_number; ++index )
+static int32_t 
+available_entry_search( struct HEADER_INFO_T *header, struct MMAP_INFO_T *mmap_entry )
+{
+	assert( NULL != header && NULL != mmap_entry );
+
+	int32_t entry_index = -1;
+	if( header->entry_index >= header->entry_total )
 	{
-		//un-used
-		struct ENTITY *entity = (struct ENTITY *)(entity_base+index);
-		if( 0 == entity->hash_code && -1 == entity->entity_next )
+		//search in the free list of entry
+		//to do
+
+		//entry zone extension
+		if( SEA_CACHED_OK != sea_cached_file_extension( &header->entry, mmap_entry ) )
 		{
-			DEBUG( "available entity index:%d\n", index );
-			return index;	
+			DEBUG( "sea_cached_file_extension error\n" );
+			return SEA_CACHED_ERROR;
 		}
+		header->entry_total = header->entry.length/sizeof(struct ENTRY_INFO_T);
+		entry_index = header->entry_index;
+	} else {
+		//direct allocation
+		entry_index = header->entry_index;
 	}
 
-	return SEA_CACHED_ERROR;
+	DEBUG( "available entry index:%d\n", entry_index );
+
+	return entry_index;
 }
-*/
 
 
 static int32_t 
-hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, 
-				const struct VAR_BUF_T *value, int32_t force_cover, 
-				uint32_t (*hash)(const struct VAR_BUF_T *key), 
-				int32_t (*compression)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) )
+hash_table_catalog_multiplier( struct HEADER_INFO_T *header, struct MMAP_INFO_T *mmap_catalog, uint32_t catalog_index )
+{
+	assert( NULL != header && NULL != mmap_catalog );
+
+	DEBUG( "hash_table_catalog_multiplier:\n" );
+
+	//catalog zone extension
+	while( (header->catalog.counter.count<<1) > header->catalog_total )
+	{
+		if( SEA_CACHED_OK != sea_cached_file_extension( &header->catalog, mmap_catalog ) )
+		{
+			DEBUG( "sea_cached_file_extension error\n" );
+			return SEA_CACHED_ERROR;
+		}
+		header->catalog_total = header->catalog.length/sizeof(struct CATALOG_INFO_T);
+	}
+
+	//catalog multiplier 
+
+	return SEA_CACHED_OK;
+}
+
+
+static int32_t 
+hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, 
+				uint32_t (*hash_callback)(const struct VAR_BUF_T *key), 
+				int32_t (*compression_callback)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) )
 {
 	assert( NULL != hash_table && NULL != hash_table->header );
 	assert( NULL != key && NULL != key->buf );
-	assert( NULL != value && NULL != value->buf );
+	assert( NULL != value );
 	
 	DEBUG( "hash_table_set:\n" );
 
@@ -418,7 +450,7 @@ hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key,
 	dump_header_info( header );
 
 	//hash_counting
-	uint32_t hash_code = (NULL == hash)?hash_calculating( key ):hash( key );
+	uint32_t hash_code = (NULL == hash_callback)?hash_calculating( key ):hash_callback( key );
 	DEBUG( "hash_code:%u\n", hash_code );
 
 	uint32_t catalog_depth = header->catalog_depth;
@@ -433,47 +465,41 @@ hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key,
 	DEBUG( "bucket_depth:%d bucket_count:%d\n", bucket_depth, bucket_count );
 
 	int32_t entry_first = cl->entry_first;
-	DEBUG( "entry_first:%u\n", entry_first );
+	DEBUG( "entry_first:%d\n", entry_first );
 		
 	const struct ENTRY_INFO_T *pre = NULL;
 	if( 0 != bucket_count )
 	{
-		int32_t call_flag = SEA_CACHED_SET_CALL; 
-		int32_t ret = hash_table_search( hash_table, key, hash_code, entry_first, force_cover, call_flag, &pre );
-		if( SEA_CACHED_KEY_EXIST == ret && SEA_CACHED_FORCE_COVER != force_cover )
+		int32_t ret = hash_table_search( hash_table, key, hash_code, entry_first, &pre );
+		if( SEA_CACHED_KEY_EXIST == ret )
 		{
 			DEBUG( "duplicate key\n" );	
 			return SEA_CACHED_ERROR;	
 		}
 	}
 
-	struct MMAP_INFO_T *mmap_entry = &hash_table->entry;
-	//struct MMAP_INFO_T *mmap_data = &hash_table->data;
-	if( SEA_CACHED_FORCE_COVER == force_cover )
-	{
-	
-	}
-
+	int32_t catalog_multiplier_flag = 0;
 	if( bucket_count == header->bucket_size )
 	{
-		//catalog multiplier 
-
-	} else {
-		//search && insert if unique
-	
+		if( SEA_CACHED_OK != hash_table_catalog_multiplier( header, mmap_catalog, catalog_index ) )
+		{
+			DEBUG( "hash_table_catalog_multiplier error\n" );	
+			return SEA_CACHED_ERROR;
+		}
+		catalog_multiplier_flag = SEA_CACHED_CATALOG_MULTIPLE;
 	}
 
-	int32_t entry_index = -1;
-	if( header->entry_index >= header->entry_total )
+	//search and insert if unique
+	struct MMAP_INFO_T *mmap_entry = &hash_table->entry;
+	int32_t entry_index = available_entry_search( header, mmap_entry );
+	if( SEA_CACHED_ERROR == entry_index )
 	{
-		//
-	} else {
-		//direct allocation
-		entry_index = header->entry_index;
+		DEBUG( "available_entry_search error\n" );
+		return SEA_CACHED_ERROR;
 	}
 
-	//write key-value to file
-	if( SEA_CACHED_OK != hash_table_data_write( hash_table, key, value, compression ) )
+	//write key-value to data zone
+	if( SEA_CACHED_OK != hash_table_data_write( hash_table, key, value, compression_callback ) )
 	{
 		DEBUG( "hash_table_data_write error\n" );	
 		return SEA_CACHED_ERROR;
@@ -486,7 +512,7 @@ hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key,
 	new_entry->key_value_size |= (value->size);
 	new_entry->data_offset = header->data.counter.cursor;
 
-	//insert entity to chain
+	//insert entry to bucket chain
 	if( 0 == bucket_count || NULL == pre )
 	{
 		cl->entry_first = entry_index;
@@ -498,11 +524,19 @@ hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key,
 	}	
 
 	header->entry.counter.count += 1;
+
 	if( header->entry_index < header->entry_total )
-		header->entry_index += 1;	
+		header->entry_index += 1;
+
 	header->data.counter.cursor += (key->size+value->size);
+	
 	cl->depth_and_count = (cl->depth_and_count&0xffff)+1;
 
+	if( SEA_CACHED_CATALOG_MULTIPLE == catalog_multiplier_flag )
+		header->catalog_depth = ( header->catalog_depth >= (bucket_depth+1) )?header->catalog_depth:(bucket_depth+1);
+
+	//struct MMAP_INFO_T *mmap_data = &hash_table->data;
+	
 	DEBUG( "hash_table_set OK\n" );
 	
 	return SEA_CACHED_OK;
@@ -795,7 +829,9 @@ sea_cached_file_close( struct SEA_CACHED_T *cached )
 */
 
 static int32_t 
-hash_table_data_write( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, int32_t (*compression)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) )
+hash_table_data_write( struct HASH_TABLE_T *hash_table, 
+					const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, 
+					int32_t (*compression_callback)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) )
 {
 	assert( NULL != hash_table );
 	assert( NULL != key && NULL != key->buf );
@@ -805,11 +841,12 @@ hash_table_data_write( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *
 	
 	struct FILE_INFO_T *data = &hash_table->header->data;	
 	
-	DEBUG( "data->counter.cursor:%d date->length:%d\n",data->counter.cursor, data->length );
+	DEBUG( "data->counter.cursor:%d data->length:%d\n",data->counter.cursor, data->length );
 	DEBUG( "key->size:%d value->size:%d\n", key->size, value->size );
 	
 	while( (data->length-data->counter.cursor) < (key->size+value->size) )
 	{
+		//data zone extension
 		if( SEA_CACHED_OK != sea_cached_file_extension( data, &hash_table->data ) )
 		{
 			DEBUG( "sea_cached_file_extension error\n" );
@@ -820,10 +857,10 @@ hash_table_data_write( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *
 	//to do
 	if( 0 )
 	{
-		if( NULL != compression )
-			compression( NULL, NULL );
+		if( NULL != compression_callback )
+			compression_callback( NULL, NULL );
 		else 
-			data_compression( NULL, NULL );
+			hash_table_data_compression( NULL, NULL );
 	}
 
 	struct MMAP_INFO_T *mmap_data = &hash_table->data;
@@ -860,7 +897,7 @@ int main()
 	//hash_table_initial
 	const char *table_name = "./test/test";
 	struct HASH_TABLE_T *hash_table = sea_cached_hash_table_seach( cached.hash_table, table_name, strlen(table_name) );	
-	uint32_t bucket_size = BUCKET_SIZE_MAX;
+	uint32_t bucket_size = SEA_CACHED_BUCKET_SIZE;
 	if ( NULL == hash_table && NULL == (hash_table = hash_table_create( &cached ,table_name, bucket_size ) ) )
 	{
 		DEBUG( "hash_table_create error\n" );
@@ -884,7 +921,7 @@ int main()
 
 	struct timeval start;
 	gettimeofday( &start, NULL );
-	hash_table_set( hash_table, &key, &value, 0, NULL, NULL );
+	hash_table_set( hash_table, &key, &value, NULL, NULL );
 	struct timeval stop;
 	gettimeofday( &stop, NULL );
 
