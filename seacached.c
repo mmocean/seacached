@@ -26,7 +26,10 @@ static int32_t
 sea_cached_file_mmap( struct FILE_INFO_T *file, struct MMAP_INFO_T *map );
 
 static int32_t 
-data_compression_wrapper( const struct VAR_BUF_T *key, struct VAR_BUF_T *res )
+hash_table_data_write( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, int32_t (*compression)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) );
+
+static int32_t 
+data_compression( const struct VAR_BUF_T *key, struct VAR_BUF_T *res )
 {
 	assert( NULL != key && NULL != key->buf );
 	assert( NULL != res && NULL != res->buf );
@@ -35,16 +38,18 @@ data_compression_wrapper( const struct VAR_BUF_T *key, struct VAR_BUF_T *res )
 }
 
 static uint32_t 
-hash_counting_wrapper( const struct VAR_BUF_T *key )
+hash_calculating( const struct VAR_BUF_T *key )
 {
 	assert( NULL != key && NULL != key->buf );
 
 	//BKDRHash
-	unsigned int seed = 131; //magic number
-	const char *str = (const char *)key->buf;
-	
+	//magic number
+	uint32_t seed = 131; 
+
+	const char *str = (const char *)key->buf;	
 	uint32_t hash_code = 0;
-	while( '\0' != *str )
+	uint32_t i = 0;
+	for( i = 0; i<key->size; ++i )
 	{
 		hash_code = hash_code*seed + (*str++);
 	}
@@ -52,29 +57,6 @@ hash_counting_wrapper( const struct VAR_BUF_T *key )
 	return hash_code&0x7fffffff;
 }
 
-
-static int32_t 
-bucket_number_counting( int32_t entity_number, int32_t bucket_average_size )
-{
-	assert( entity_number > 0 && bucket_average_size > 0 );
-	
-	//to count the smallest prime greater than entity_size/bucket_average_size
-	int32_t bucket_number = entity_number/bucket_average_size;
-	while( ++bucket_number > 0 )
-	{
-		int32_t n = (bucket_number>>1)+1;
-		int32_t i = 2;
-		for( i = 2; i < n; ++i )
-		{
-			if( 0 == bucket_number%i )	
-				break;
-		}
-		if( i == n )
-			return bucket_number;
-	}
-
-	return SEA_CACHED_ERROR;
-}
 
 static void
 dump_header_info( struct HEADER_INFO_T *header )
@@ -88,36 +70,39 @@ dump_header_info( struct HEADER_INFO_T *header )
 	size += snprintf( buf, sizeof(buf), 
 		"%s: %s\n %s: %u\n %s: %u\n %s: %u\n "
 		"%s: %u\n %s: %u\n %s: %u\n %s: %u\n ",
-		"table_name:", header->table_name,
+		"# table_name #", header->table_name,
 		"flag", header->flag,
 		"version", header->version,
 		"bucket_size", header->bucket_size,
-		"catalog_count", header->catalog_count,
 		"catalog_depth", header->catalog_depth,	
-		"entry_count", header->entry_count,	
-		"entry_sequence", header->entry_sequence );
+		"catalog_total", header->catalog_total,
+		"entry_index", header->entry_index,
+		"entry_total", header->entry_total );
 
+		//"catalog_count", header->catalog_count,
+		//"entry_count", header->entry_count,	
+	
 	size += snprintf( buf+size, sizeof(buf)-size, 
-		"%s\n %s: %s\n %s: %u\n %s: %u\n %s: %u\n ",
+		"%s\n %s: %s\n %s: %u\n %s: %u B\n %s: %u B\n ",
 		"# catalog #",
 		"name", header->catalog.name,
-		"cursor", header->catalog.cursor,
+		"count", header->catalog.counter.count,
 		"length", header->catalog.length,
 		"align_size", header->catalog.align_size );
 	size += snprintf( buf+size, sizeof(buf)-size, 
-		"%s\n %s: %s\n %s: %u\n %s: %u\n %s: %u\n ",
+		"%s\n %s: %s\n %s: %u\n %s: %u B\n %s: %u B\n ",
 		"# entry #",
-		"name", header->catalog.name,
-		"cursor", header->catalog.cursor,
-		"length", header->catalog.length,
-		"align_size", header->catalog.align_size );
+		"name", header->entry.name,
+		"count", header->entry.counter.count,
+		"length", header->entry.length,
+		"align_size", header->entry.align_size );
 	size += snprintf( buf+size, sizeof(buf)-size, 
-		"%s\n %s: %s\n %s: %u\n %s: %u\n %s: %u\n ",
+		"%s\n %s: %s\n %s: %u\n %s: %u B\n %s: %u B\n ",
 		"# data #",
-		"name", header->catalog.name,
-		"cursor", header->catalog.cursor,
-		"length", header->catalog.length,
-		"align_size", header->catalog.align_size );
+		"name", header->data.name,
+		"cursor", header->data.counter.cursor,
+		"length", header->data.length,
+		"align_size", header->data.align_size );
 
 	DEBUG( "dump_header_info:\n %s\n", buf );
 }
@@ -267,7 +252,7 @@ hash_table_create( struct SEA_CACHED_T *cached, const char *table_name, uint32_t
 			DEBUG( "sea_cached_file_extension error\n" );
 			return NULL;
 		}
-		header = (struct HEADER_INFO_T *)( cached->mmap->base + (cached->file->length/cached->file->align_size-1) );
+		header = (struct HEADER_INFO_T *)cached->mmap->base + (cached->file->length/cached->file->align_size-1);
 	} else {
 		header = (struct HEADER_INFO_T *)hash_table->header;
 	}
@@ -322,19 +307,23 @@ hash_table_initial( struct HASH_TABLE_T *hash_table )
 		DEBUG( "sea_cached_file_mmap error\n" );
 		return SEA_CACHED_ERROR;
 	}
+	header->catalog_total = catalog->length/sizeof(struct CATALOG_INFO_T);
+	header->catalog.counter.count = 2;	//default
 
 	if( SEA_CACHED_OK != sea_cached_file_mmap( entry, &hash_table->entry ) )
 	{
 		DEBUG( "sea_cached_file_mmap error\n" );
 		return SEA_CACHED_ERROR;
 	}
-
+	header->entry_total = entry->length/sizeof(struct ENTRY_INFO_T);
+	
 	if( SEA_CACHED_OK != sea_cached_file_mmap( data, &hash_table->data ) )
 	{
 		DEBUG( "sea_cached_file_mmap error\n" );
 		return SEA_CACHED_ERROR;
 	}
 
+	
 	return SEA_CACHED_OK;
 }
 
@@ -344,55 +333,54 @@ hash_table_initial( struct HASH_TABLE_T *hash_table )
  * otherwise:SEA_CACHED_ERROR is returned, copy previous entity to 
  * */
 
-/*
+
 static int32_t
-sea_cached_search( const struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, uint32_t hash_code, int32_t entity_number, int32_t bucket_index, int32_t force_cover, int32_t call_flag, struct ENTITY **entity )
+hash_table_search( const struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, uint32_t hash_code, 
+				int32_t entry_first, int32_t force_cover, int32_t call_flag, const struct ENTRY_INFO_T **entry )
 {
-	assert( NULL != cached );
+	assert( NULL != hash_table && NULL != entry );
+	assert( NULL != key && NULL != key->buf );
 
-	DEBUG( "sea_cached_search:\n" );	
+	DEBUG( "hash_table_search:\n" );	
+
+	const struct MMAP_INFO_T *mmap_entry = &hash_table->entry;
+	struct ENTRY_INFO_T *pre = NULL;
+	int32_t entry_next = entry_first; 
+	while( -1 != entry_next )
+	{	
+		struct ENTRY_INFO_T *iter = (struct ENTRY_INFO_T *)mmap_entry->base + entry_next;
 	
-	//search
-	struct BUCKET *bucket_base = (struct BUCKET*)( cached->bucket_base );
-	int32_t next = (bucket_base+bucket_index)->first_entity;
-
-	struct ENTITY *entity_base = (struct ENTITY*)( cached->entity_base );
-	struct ENTITY *pre = NULL;
-	int i = 0;
-	for( i = 0; i<entity_number; ++i )
-	{
-		struct ENTITY *tmp = entity_base+next;
-
-		if( hash_code < tmp->hash_code )
+		if( hash_code < iter->hash_code )
 			break;
 
-		if( hash_code == tmp->hash_code && ((tmp->kv_size>>22)&0x3ff) == key->size )
+		if( hash_code == iter->hash_code && ((iter->key_value_size>>22)&0x3ff) == key->size )
 		{
-			if( 0 == memcmp( (void*)((char*)cached->mmap_base+tmp->content_index), (void*)key->buf, key->size ) )
+			const struct MMAP_INFO_T *data = &hash_table->data;
+			if( 0 == memcmp( (void*)((char*)data->base+iter->data_offset), (void*)key->buf, key->size ) )
 			{
 				DEBUG( "key already exists\n" );
-				if( SEA_CACHED_FORCE_COVER == force_cover || SEA_CACHED_GET_CALL == call_flag )
+				if( SEA_CACHED_SET_CALL == call_flag && SEA_CACHED_FORCE_COVER != force_cover )
 				{
-					*entity = tmp;						
+					*entry = pre;	
 				} else {
-					*entity = pre;	
+					*entry = iter;						
 				}
 				return SEA_CACHED_KEY_EXIST;
 			}
 		}	
-		pre = tmp;
-		next = tmp->entity_next;
+		pre = iter;
+		entry_next = iter->entry_next;	
 	}
 
-	*entity = pre;							
+	*entry = pre;							
 	DEBUG( "nonexistence key\n" );
 
 	return SEA_CACHED_KEY_NON_EXIST;	
 }
 
-
+/*
 static int32_t 
-available_entity_search( const struct ENTITY *entity_base, int32_t entity_number )
+available_entry_search( const struct ENTITY *entity_base, int32_t entity_number )
 {
 	assert( NULL != entity_base );
 
@@ -410,11 +398,14 @@ available_entity_search( const struct ENTITY *entity_base, int32_t entity_number
 
 	return SEA_CACHED_ERROR;
 }
-
 */
 
+
 static int32_t 
-hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, int32_t force_cover )
+hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, 
+				const struct VAR_BUF_T *value, int32_t force_cover, 
+				uint32_t (*hash)(const struct VAR_BUF_T *key), 
+				int32_t (*compression)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) )
 {
 	assert( NULL != hash_table && NULL != hash_table->header );
 	assert( NULL != key && NULL != key->buf );
@@ -423,37 +414,32 @@ hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, co
 	DEBUG( "hash_table_set:\n" );
 
 	struct HEADER_INFO_T *header = hash_table->header;
+
 	dump_header_info( header );
 
-	struct MMAP_INFO_T *catalog = &hash_table->catalog;
-	struct MMAP_INFO_T *entry = &hash_table->entry;
-	struct MMAP_INFO_T *data = &hash_table->data;
-
 	//hash_counting
-	uint32_t hash_code = hash_counting_wrapper( key );
+	uint32_t hash_code = (NULL == hash)?hash_calculating( key ):hash( key );
 	DEBUG( "hash_code:%u\n", hash_code );
 
-	/*
-	//be full
-	DEBUG( "header->entity_count:%d\n", header->entity_count );
-	if( header->entity_count > header->entity_number )
-	{
-		return SEA_CACHED_ERROR;
-	}
-
+	uint32_t catalog_depth = header->catalog_depth;
+	uint32_t catalog_index = hash_code&(1<<catalog_depth);		
+	DEBUG( "catalog_depth:%d catalog_index:%d\n", catalog_depth, catalog_index );
 	
-	int32_t bucket_index = hash_code%header->bucket_number;
-	DEBUG( "bucket_index:%d\n", bucket_index );
+	struct MMAP_INFO_T *mmap_catalog = &hash_table->catalog;
+	struct CATALOG_INFO_T *cl = (struct CATALOG_INFO_T *)mmap_catalog->base+catalog_index;
 
-	struct BUCKET *bucket_base = (struct BUCKET*)( cached->bucket_base );
-	int32_t entity_number = (bucket_base+bucket_index)->entity_number;
-	DEBUG( "entity_number of bucket:%d\n", entity_number );
-	
-	struct ENTITY *pre = NULL;
-	if( 0 != entity_number )
+	uint32_t bucket_depth = (cl->depth_and_count>>16)&0xffff;
+	uint32_t bucket_count = cl->depth_and_count&0xffff;
+	DEBUG( "bucket_depth:%d bucket_count:%d\n", bucket_depth, bucket_count );
+
+	int32_t entry_first = cl->entry_first;
+	DEBUG( "entry_first:%u\n", entry_first );
+		
+	const struct ENTRY_INFO_T *pre = NULL;
+	if( 0 != bucket_count )
 	{
 		int32_t call_flag = SEA_CACHED_SET_CALL; 
-		int32_t ret = sea_cached_search( cached, key, hash_code, entity_number, bucket_index, force_cover, call_flag, &pre );
+		int32_t ret = hash_table_search( hash_table, key, hash_code, entry_first, force_cover, call_flag, &pre );
 		if( SEA_CACHED_KEY_EXIST == ret && SEA_CACHED_FORCE_COVER != force_cover )
 		{
 			DEBUG( "duplicate key\n" );	
@@ -461,57 +447,64 @@ hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, co
 		}
 	}
 
-	struct ENTITY *entity_base = (struct ENTITY*)( cached->entity_base );
-	int32_t index = -1;
-	if( header->entity_incre >= header->entity_number )
+	struct MMAP_INFO_T *mmap_entry = &hash_table->entry;
+	//struct MMAP_INFO_T *mmap_data = &hash_table->data;
+	if( SEA_CACHED_FORCE_COVER == force_cover )
 	{
-		index = available_entity_search( entity_base, header->entity_number );
-		if( SEA_CACHED_ERROR == index ) 
-		{
-			DEBUG( "available_entity_search error\n" );	
-			return SEA_CACHED_ERROR;
-		}
+	
+	}
+
+	if( bucket_count == header->bucket_size )
+	{
+		//catalog multiplier 
+
+	} else {
+		//search && insert if unique
+	
+	}
+
+	int32_t entry_index = -1;
+	if( header->entry_index >= header->entry_total )
+	{
+		//
 	} else {
 		//direct allocation
-		index = header->entity_incre;
+		entry_index = header->entry_index;
 	}
 
 	//write key-value to file
-	if( sea_cached_content_write( cached, key, value ) != SEA_CACHED_OK )
+	if( SEA_CACHED_OK != hash_table_data_write( hash_table, key, value, compression ) )
 	{
-		DEBUG( "sea_cached_content_write error\n" );	
+		DEBUG( "hash_table_data_write error\n" );	
 		return SEA_CACHED_ERROR;
 	}
 
-	struct ENTITY entity;
-	entity.hash_code = hash_code;
-	entity.kv_size = 0;
-	entity.kv_size |= (key->size<<22);
-	entity.kv_size |= (value->size);
-	entity.content_index = cached->content_cursor;
+	struct ENTRY_INFO_T *new_entry = (struct ENTRY_INFO_T *)mmap_entry->base+entry_index;
+	new_entry->hash_code = hash_code;
+	new_entry->key_value_size = 0;
+	new_entry->key_value_size |= (key->size<<22);
+	new_entry->key_value_size |= (value->size);
+	new_entry->data_offset = header->data.counter.cursor;
 
 	//insert entity to chain
-	if( 0 == entity_number || NULL == pre )
+	if( 0 == bucket_count || NULL == pre )
 	{
-		(bucket_base+bucket_index)->first_entity = index;
-		entity.entity_next = -1;
+		cl->entry_first = entry_index;
+		new_entry->entry_next = -1;
 	} else {
-		entity.entity_next = pre->entity_next;
-		pre->entity_next = index;	
+		struct ENTRY_INFO_T *tmp = (struct ENTRY_INFO_T *)pre;
+		new_entry->entry_next = tmp->entry_next;
+		tmp->entry_next = entry_index;	
 	}	
-	memcpy( (void*)(entity_base+index), (void*)&entity, sizeof(struct ENTITY) );
-	
-	(bucket_base+bucket_index)->entity_number += 1;
-	
-	header->entity_count += 1;
-	header->content_size += (key->size+value->size);
-	if( header->entity_incre < header->entity_number )
-		header->entity_incre += 1;
 
-	cached->content_cursor += (key->size+value->size);
+	header->entry.counter.count += 1;
+	if( header->entry_index < header->entry_total )
+		header->entry_index += 1;	
+	header->data.counter.cursor += (key->size+value->size);
+	cl->depth_and_count = (cl->depth_and_count&0xffff)+1;
 
 	DEBUG( "hash_table_set OK\n" );
-	*/	
+	
 	return SEA_CACHED_OK;
 }
 
@@ -528,7 +521,7 @@ hash_table_get( const struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, 
 	struct HEADER *header = cached->header;
 	
 	//hash_counting
-	uint32_t hash_code = hash_counting_wrapper( key );
+	uint32_t hash_code = hash_calculating( key );
 	DEBUG( "hash_code:%u\n", hash_code );
 
 	int32_t bucket_index = hash_code%header->bucket_number;
@@ -542,7 +535,7 @@ hash_table_get( const struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, 
 	if( 0 != entity_number )
 	{
 		int32_t call_flag = SEA_CACHED_GET_CALL; 
-		int32_t ret = sea_cached_search( cached, key, hash_code, entity_number, bucket_index, 0, call_flag, &entity );
+		int32_t ret = hash_table_search( cached, key, hash_code, entity_number, bucket_index, 0, call_flag, &entity );
 		if( SEA_CACHED_KEY_NON_EXIST == ret )
 		{
 			DEBUG( "nonexistence key\n" );
@@ -587,7 +580,7 @@ sea_cached_delete( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key )
 	struct HEADER *header = cached->header;
 	
 	//hash_counting
-	uint32_t hash_code = hash_counting_wrapper( key );
+	uint32_t hash_code = hash_calculating( key );
 	DEBUG( "hash_code:%u\n", hash_code );
 
 	int32_t bucket_index = hash_code%header->bucket_number;
@@ -601,7 +594,7 @@ sea_cached_delete( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key )
 	if( 0 != entity_number )
 	{
 		int32_t call_flag = SEA_CACHED_DELETE_CALL; 
-		int32_t ret = sea_cached_search( cached, key, hash_code, entity_number, bucket_index, 0, call_flag, &entity );
+		int32_t ret = hash_table_search( cached, key, hash_code, entity_number, bucket_index, 0, call_flag, &entity );
 		if( SEA_CACHED_KEY_NON_EXIST == ret )
 		{
 			DEBUG( "nonexistence key\n" );
@@ -638,6 +631,8 @@ static int32_t
 sea_cached_file_extension( struct FILE_INFO_T *file, struct MMAP_INFO_T *map )
 {
 	assert( NULL != file && NULL != map );
+		
+	DEBUG( "sea_cached_file_extension:\n" );
 
 	uint32_t length = (file->length/file->align_size+1)*file->align_size;
 
@@ -698,8 +693,9 @@ sea_cached_file_mmap( struct FILE_INFO_T *file, struct MMAP_INFO_T *map )
 
 	DEBUG( "sea_cached_file_mmap:\n" );	
 
-	//S_IRWXU: 00700 user (file owner) has  read,  write  and  execute permission
-	int32_t fd = open( file->name, O_RDWR|O_CREAT, S_IRWXU );
+	//S_IRUSR  00400 user has read permission
+	//S_IWUSR  00200 user has write permission
+	int32_t fd = open( file->name, O_RDWR|O_CREAT, S_IRUSR|S_IWUSR );
 	if( -1 == fd )
 	{
 		DEBUG( "open error:%s\n", strerror(errno) );
@@ -796,24 +792,27 @@ sea_cached_file_close( struct SEA_CACHED_T *cached )
 	return SEA_CACHED_OK;
 }
 
+*/
 
 static int32_t 
-sea_cached_content_write( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value )
+hash_table_data_write( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, int32_t (*compression)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) )
 {
-	assert( NULL != cached );
+	assert( NULL != hash_table );
+	assert( NULL != key && NULL != key->buf );
+	assert( NULL != value );
 	
-	struct HEADER *header = cached->header;
+	DEBUG( "hash_table_data_write:\n" );
 	
-	DEBUG( "header->file_length:%d cached->content_cursor:%d\n", header->file_length, cached->content_cursor );
+	struct FILE_INFO_T *data = &hash_table->header->data;	
+	
+	DEBUG( "data->counter.cursor:%d date->length:%d\n",data->counter.cursor, data->length );
 	DEBUG( "key->size:%d value->size:%d\n", key->size, value->size );
 	
-	if( (header->file_length-cached->content_cursor) < (key->size+value->size) )
+	while( (data->length-data->counter.cursor) < (key->size+value->size) )
 	{
-		//to do
-		int32_t size = CONTENT_EXTENSION_SIZE;
-		if( sea_cached_content_extension( cached, size ) != SEA_CACHED_OK )	
+		if( SEA_CACHED_OK != sea_cached_file_extension( data, &hash_table->data ) )
 		{
-			DEBUG( "sea_cached_content_extension error\n" );	
+			DEBUG( "sea_cached_file_extension error\n" );
 			return SEA_CACHED_ERROR;
 		}
 	}
@@ -821,26 +820,21 @@ sea_cached_content_write( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *k
 	//to do
 	if( 0 )
 	{
-		data_compression_wrapper( NULL, NULL );
+		if( NULL != compression )
+			compression( NULL, NULL );
+		else 
+			data_compression( NULL, NULL );
 	}
 
-	memcpy( (void*)((char*)cached->mmap_base+cached->content_cursor), (void*)key->buf, key->size );
-	memcpy( (void*)((char*)cached->mmap_base+cached->content_cursor+key->size), (void*)value->buf, value->size );
+	struct MMAP_INFO_T *mmap_data = &hash_table->data;
+	if( NULL != key->buf )
+		memcpy( (void*)((char*)mmap_data->base+data->counter.cursor), (void*)key->buf, key->size );
+	if( NULL != value->buf )
+	memcpy( (void*)((char*)mmap_data->base+data->counter.cursor+key->size), (void*)value->buf, value->size );
 
 	return SEA_CACHED_OK;
 }
 
-
-static int32_t 
-sea_cached_capacity_extension( struct SEA_CACHED_T *cached )
-{
-	assert( NULL != cached );
-
-	DEBUG( "sea_cached_capacity_extension:\n" );	
-
-	return SEA_CACHED_OK;
-}
-*/
 
 int main()
 {
@@ -880,20 +874,21 @@ int main()
 	struct VAR_BUF_T key;
 	struct VAR_BUF_T value;
 	
-	key.buf = "1234568";
-	key.size = strlen(key.buf);
+	const char *buf1 = "1234568";
+	key.buf = (void*)buf1;
+	key.size = strlen(buf1);
 	
-	value.buf = "ABCD";
-	value.size = strlen(value.buf);
+	const char *buf2 = "ABCD";
+	value.buf = (void*)buf2;
+	value.size = strlen(buf2);
 
 	struct timeval start;
 	gettimeofday( &start, NULL );
-	hash_table_set( hash_table, &key, &value, 0 );
+	hash_table_set( hash_table, &key, &value, 0, NULL, NULL );
 	struct timeval stop;
 	gettimeofday( &stop, NULL );
 
-	DEBUG( "%d %d \n", (int32_t)start.tv_sec, (int32_t)start.tv_usec );
-	DEBUG( "%d %d \n", (int32_t)stop.tv_sec, (int32_t)stop.tv_usec );
+	DEBUG( "%d us\n", ((int32_t)stop.tv_sec-(int32_t)start.tv_sec)*1000000+(int32_t)stop.tv_usec-(int32_t)start.tv_usec );
 
 	/*
 	struct VAR_BUF_T res;
