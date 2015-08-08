@@ -112,6 +112,49 @@ dump_header_info( struct HEADER_INFO_T *header )
 }
 
 
+static void
+dump_catalog_info( struct CATALOG_INFO_T *catalog )
+{
+	assert( NULL != catalog );
+	
+	char buf[512];
+	memset( buf, 0, sizeof(buf) );
+	int32_t size = 0;
+	
+	size += snprintf( buf, sizeof(buf), 
+		"%s:\n %s: %u\n %s: %u\n %s: %u\n %s: %d\n ",
+		"# catalog #",
+		"entry_count", catalog->entry_count,
+		"hash_collision", catalog->hash_collision,
+		"bucket_depth", catalog->bucket_depth,
+		"entry_first", catalog->entry_first );
+
+	DEBUG( "dump_catalog_info:\n %s\n", buf );
+}
+
+
+static void
+dump_entry_info( struct ENTRY_INFO_T *entry )
+{
+	assert( NULL != entry );
+
+	char buf[512];
+	memset( buf, 0, sizeof(buf) );
+	int32_t size = 0;
+	
+	size += snprintf( buf, sizeof(buf), 
+		"%s:\n %s: %u\n %s: %u\n %s: %u\n %s: %u\n %s: %d\n ",
+		"# entry #",
+		"hash_code", entry->hash_code,
+		"data_offset", entry->data_offset,
+		"value_size", entry->value_size,
+		"key_size", entry->key_size,
+		"entry_next", entry->entry_next );
+
+	DEBUG( "dump_entry_info:\n %s\n", buf );
+}
+
+
 /*
 static void
 offset_counting( struct HEADER *header )
@@ -313,7 +356,8 @@ hash_table_initial( struct HASH_TABLE_T *hash_table )
 		return SEA_CACHED_ERROR;
 	}
 	header->catalog_total = catalog->length/sizeof(struct CATALOG_INFO_T);
-	header->catalog.counter.count = 2;	//default
+	if( 0 == header->catalog.counter.count )
+		header->catalog.counter.count = 1;	//default
 
 	if( SEA_CACHED_OK != sea_cached_file_mmap( entry, &hash_table->entry ) )
 	{
@@ -342,7 +386,8 @@ hash_table_initial( struct HASH_TABLE_T *hash_table )
 
 static int32_t
 hash_table_search( const struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, 
-				uint32_t hash_code, int32_t entry_first, const struct ENTRY_INFO_T **entry )
+				uint32_t hash_code, int32_t entry_first, const struct ENTRY_INFO_T **entry,
+				uint32_t *hash_collison_count )
 {
 	assert( NULL != hash_table && NULL != entry );
 	assert( NULL != key && NULL != key->buf );
@@ -359,8 +404,10 @@ hash_table_search( const struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T
 		if( hash_code < iter->hash_code )
 			break;
 
-		if( hash_code == iter->hash_code && ((iter->key_value_size>>22)&0x3ff) == key->size )
+		if( hash_code == iter->hash_code && iter->key_size == key->size )
 		{
+			if( NULL != hash_collison_count )
+				++(*hash_collison_count);
 			const struct MMAP_INFO_T *data = &hash_table->data;
 			if( 0 == memcmp( (void*)((char*)data->base+iter->data_offset), (void*)key->buf, key->size ) )
 			{
@@ -417,7 +464,7 @@ hash_table_catalog_multiplier( struct HEADER_INFO_T *header, struct MMAP_INFO_T 
 
 	DEBUG( "hash_table_catalog_multiplier:\n" );
 
-	//catalog zone extension
+	//catalog zone extension	
 	while( (header->catalog.counter.count<<1) > header->catalog_total )
 	{
 		if( SEA_CACHED_OK != sea_cached_file_extension( &header->catalog, mmap_catalog ) )
@@ -428,11 +475,47 @@ hash_table_catalog_multiplier( struct HEADER_INFO_T *header, struct MMAP_INFO_T 
 		header->catalog_total = header->catalog.length/sizeof(struct CATALOG_INFO_T);
 	}
 
-	//catalog multiplier 
-
 	return SEA_CACHED_OK;
 }
 
+
+static void
+hash_table_adjust_bucket( struct MMAP_INFO_T *mmap_entry, struct CATALOG_INFO_T *catalog, struct ENTRY_INFO_T *entry, int32_t entry_index )
+{
+	assert( NULL != mmap_entry && NULL != catalog && NULL != entry );
+	
+	DEBUG( "hash_table_adjust_bucket:\n" );
+	
+	//insert into catalog	
+	if( 0 == catalog->entry_count )
+	{
+		catalog->entry_first = entry_index;
+		entry->entry_next = -1;
+	} else {
+		struct ENTRY_INFO_T *tmp = NULL;
+		int32_t next = catalog->entry_first;
+		uint32_t i = 0;
+		for( i = 0; i<catalog->entry_count; ++i )
+		{
+			tmp = (struct ENTRY_INFO_T *)mmap_entry->base + next;
+			if( entry->hash_code == tmp->hash_code )
+			{												
+				entry->entry_next = tmp->entry_next;
+				tmp->entry_next = entry_index;
+				catalog->hash_collision += 1;
+				break;
+			}
+			if( i != (catalog->entry_count-1) )
+				next = tmp->entry_next;
+		}
+		if( i == catalog->entry_count )
+		{
+			entry->entry_next = tmp->entry_next;
+			tmp->entry_next = entry_index;
+		}
+	}
+	catalog->entry_count += 1;
+}
 
 static int32_t 
 hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, 
@@ -453,44 +536,110 @@ hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, co
 	uint32_t hash_code = (NULL == hash_callback)?hash_calculating( key ):hash_callback( key );
 	DEBUG( "hash_code:%u\n", hash_code );
 
-	uint32_t catalog_depth = header->catalog_depth;
-	uint32_t catalog_index = hash_code&(1<<catalog_depth);		
-	DEBUG( "catalog_depth:%d catalog_index:%d\n", catalog_depth, catalog_index );
-	
 	struct MMAP_INFO_T *mmap_catalog = &hash_table->catalog;
-	struct CATALOG_INFO_T *cl = (struct CATALOG_INFO_T *)mmap_catalog->base+catalog_index;
-
-	uint32_t bucket_depth = (cl->depth_and_count>>16)&0xffff;
-	uint32_t bucket_count = cl->depth_and_count&0xffff;
-	DEBUG( "bucket_depth:%d bucket_count:%d\n", bucket_depth, bucket_count );
-
-	int32_t entry_first = cl->entry_first;
-	DEBUG( "entry_first:%d\n", entry_first );
-		
+	struct MMAP_INFO_T *mmap_entry = &hash_table->entry;
+	
+	struct CATALOG_INFO_T *cl = NULL;
 	const struct ENTRY_INFO_T *pre = NULL;
-	if( 0 != bucket_count )
-	{
-		int32_t ret = hash_table_search( hash_table, key, hash_code, entry_first, &pre );
-		if( SEA_CACHED_KEY_EXIST == ret )
-		{
-			DEBUG( "duplicate key\n" );	
-			return SEA_CACHED_ERROR;	
-		}
-	}
 
-	int32_t catalog_multiplier_flag = 0;
-	if( bucket_count == header->bucket_size )
+	int32_t entry_first = 0;
+	uint32_t entry_count = 0;
+	uint32_t hash_collison_count = 0;
+	while(1)
 	{
-		if( SEA_CACHED_OK != hash_table_catalog_multiplier( header, mmap_catalog, catalog_index ) )
+		uint32_t catalog_depth = header->catalog_depth;
+		uint32_t catalog_index = (0==catalog_depth)?0:hash_code&(1<<(catalog_depth-1));		
+		DEBUG( "catalog_depth:%d catalog_index:%d\n", catalog_depth, catalog_index );
+
+		cl = (struct CATALOG_INFO_T *)mmap_catalog->base+catalog_index;
+
+		uint32_t bucket_depth = cl->bucket_depth;
+		uint32_t hash_collision = cl->hash_collision;
+		entry_count = cl->entry_count;
+		DEBUG( "bucket_depth:%d entry_count:%d hash_collision:%d\n", bucket_depth, entry_count, hash_collision );
+
+		entry_first = cl->entry_first;
+		DEBUG( "entry_first:%d\n", entry_first );
+
+		hash_collison_count = 0;
+		pre = NULL;
+		if( 0 != entry_count )
 		{
-			DEBUG( "hash_table_catalog_multiplier error\n" );	
-			return SEA_CACHED_ERROR;
+			int32_t ret = hash_table_search( hash_table, key, hash_code, entry_first, &pre, &hash_collison_count );
+			if( SEA_CACHED_KEY_EXIST == ret )
+			{
+				DEBUG( "duplicate key\n" );	
+				return SEA_CACHED_ERROR;	
+			}
 		}
-		catalog_multiplier_flag = SEA_CACHED_CATALOG_MULTIPLE;
+
+		/* if key1 != key2, but HASH(key1) == HASH(key2), so we should exclude duplicate hashcode
+		 *
+		 * */
+		DEBUG( "hash_collison_count:%d\n", hash_collison_count );
+		if( 0 == hash_collison_count && (entry_count-hash_collision) == header->bucket_size )
+		{
+			uint32_t catalog_mirror = catalog_index|(1<<bucket_depth);	
+			if( bucket_depth == header->catalog_depth )
+			{
+				if( SEA_CACHED_OK != hash_table_catalog_multiplier( header, mmap_catalog, catalog_index ) )
+				{
+					DEBUG( "hash_table_catalog_multiplier error\n" );	
+					return SEA_CACHED_ERROR;
+				}
+
+				uint32_t i = 0;
+				for( i = (1<<bucket_depth); i < (1<<(bucket_depth+1)); ++i )
+				{
+					if( catalog_mirror == i )
+						continue;
+					struct CATALOG_INFO_T *cl = (struct CATALOG_INFO_T *)mmap_catalog->base + i;
+					*cl = *( (struct CATALOG_INFO_T *)mmap_catalog->base + i - (1<<bucket_depth) );	
+				}
+			}
+
+			//adjust buckets
+			cl = (struct CATALOG_INFO_T *)mmap_catalog->base+catalog_index;
+			memset( cl, 0, sizeof(struct CATALOG_INFO_T) );
+			cl = (struct CATALOG_INFO_T *)mmap_catalog->base + catalog_mirror;
+			memset( cl, 0, sizeof(struct CATALOG_INFO_T) );
+
+			int32_t entry_next = entry_first; 
+			while( -1 != entry_next )
+			{	
+				struct ENTRY_INFO_T *iter = (struct ENTRY_INFO_T *)mmap_entry->base + entry_next;
+				int32_t next_tmp = iter->entry_next;
+				if( ((iter->hash_code)&(1<<bucket_depth)) == catalog_mirror )
+				{
+					//insert into mirror catalog
+					cl = (struct CATALOG_INFO_T *)mmap_catalog->base + catalog_mirror;
+				} else {
+					//insert into current catalog
+					cl = (struct CATALOG_INFO_T *)mmap_catalog->base + catalog_index;
+				}
+				hash_table_adjust_bucket( mmap_entry, cl, iter, entry_next );			
+				entry_next = next_tmp;
+			}
+
+			cl = (struct CATALOG_INFO_T *)mmap_catalog->base+catalog_index;
+			cl->bucket_depth = (bucket_depth+1);
+			cl = (struct CATALOG_INFO_T *)mmap_catalog->base + catalog_mirror;
+			cl->bucket_depth = (bucket_depth+1);
+
+			dump_catalog_info( (struct CATALOG_INFO_T *)mmap_catalog->base+catalog_index );
+			dump_catalog_info( (struct CATALOG_INFO_T *)mmap_catalog->base+catalog_mirror );
+			
+			if( bucket_depth == header->catalog_depth )
+				header->catalog_depth += 1;
+			header->catalog.counter.count <<= 1;
+		} else {
+			if( NULL != pre )
+				dump_entry_info( (struct ENTRY_INFO_T *)pre );
+			break;
+		}
 	}
 
 	//search and insert if unique
-	struct MMAP_INFO_T *mmap_entry = &hash_table->entry;
 	int32_t entry_index = available_entry_search( header, mmap_entry );
 	if( SEA_CACHED_ERROR == entry_index )
 	{
@@ -507,16 +656,15 @@ hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, co
 
 	struct ENTRY_INFO_T *new_entry = (struct ENTRY_INFO_T *)mmap_entry->base+entry_index;
 	new_entry->hash_code = hash_code;
-	new_entry->key_value_size = 0;
-	new_entry->key_value_size |= (key->size<<22);
-	new_entry->key_value_size |= (value->size);
+	new_entry->key_size = key->size;
+	new_entry->value_size = value->size;
 	new_entry->data_offset = header->data.counter.cursor;
 
 	//insert entry to bucket chain
-	if( 0 == bucket_count || NULL == pre )
+	if( NULL == pre )
 	{
+		new_entry->entry_next = (0 == entry_count)?-1:(cl->entry_first);
 		cl->entry_first = entry_index;
-		new_entry->entry_next = -1;
 	} else {
 		struct ENTRY_INFO_T *tmp = (struct ENTRY_INFO_T *)pre;
 		new_entry->entry_next = tmp->entry_next;
@@ -524,18 +672,14 @@ hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, co
 	}	
 
 	header->entry.counter.count += 1;
-
 	if( header->entry_index < header->entry_total )
 		header->entry_index += 1;
 
 	header->data.counter.cursor += (key->size+value->size);
 	
-	cl->depth_and_count = (cl->depth_and_count&0xffff)+1;
-
-	if( SEA_CACHED_CATALOG_MULTIPLE == catalog_multiplier_flag )
-		header->catalog_depth = ( header->catalog_depth >= (bucket_depth+1) )?header->catalog_depth:(bucket_depth+1);
-
-	//struct MMAP_INFO_T *mmap_data = &hash_table->data;
+	cl->entry_count += 1;
+	if( 0 != hash_collison_count )
+		cl->hash_collision += 1;
 	
 	DEBUG( "hash_table_set OK\n" );
 	
@@ -873,7 +1017,7 @@ hash_table_data_write( struct HASH_TABLE_T *hash_table,
 }
 
 
-int main()
+int main( int argc, char **argv )
 {
 	//sea_cached_initial
 	struct FILE_INFO_T file;
@@ -911,11 +1055,12 @@ int main()
 	struct VAR_BUF_T key;
 	struct VAR_BUF_T value;
 	
-	const char *buf1 = "1234568";
+	DEBUG( "key: %s value:%s\n", argv[2], argv[1] );
+	const char *buf1 = argv[2];
 	key.buf = (void*)buf1;
 	key.size = strlen(buf1);
 	
-	const char *buf2 = "ABCD";
+	const char *buf2 = argv[1];
 	value.buf = (void*)buf2;
 	value.size = strlen(buf2);
 

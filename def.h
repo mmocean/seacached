@@ -23,15 +23,18 @@ struct VAR_BUF_T
 /*core data type definitions*/
 struct CATALOG_INFO_T
 {	
-	uint32_t depth_and_count;	/*[0...n]count of entry,[n+1...31]locale depth of bucket*/
-	int32_t entry_first;		/*chaining to solve a collision*/
+	uint32_t entry_count		:8;		/*[0...n]count of entry*/
+	uint32_t hash_collision		:8;	
+	uint32_t bucket_depth		:16;	/*[n+1...31]locale depth of bucket*/
+	int32_t	 entry_first;			/*chaining to solve a collision*/
 };
 
 struct ENTRY_INFO_T
 {
 	uint32_t hash_code;			/*order by hash_code in one bucket*/ 
 	uint32_t data_offset;
-	uint32_t key_value_size;	/*[0...n]value,[n+1...31]key*/
+	uint32_t value_size	:22;	/*[0...n]value>*/
+	uint32_t key_size	:10;	/*[n+1...31]key*/
 	int32_t entry_next;
 };
 
@@ -91,7 +94,7 @@ struct SEA_CACHED_T
 #define SEA_CACHED_ERROR			((int32_t)-1)
 
 #define SEA_CACHED_VERSION			((uint32_t)1)
-#define SEA_CACHED_BUCKET_SIZE		((int32_t) 8)	/*default 8*/
+#define SEA_CACHED_BUCKET_SIZE		((int32_t) 4)	/*default 8*/
 #define SEA_CACHED_CATALOG_MULTIPLE	((int32_t) 1)	/*default 8*/
 
 #define SEA_CACHED_SET_CALL			((int32_t)0x00000001)
