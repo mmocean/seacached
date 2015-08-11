@@ -5,12 +5,12 @@
 	> Created Time: 2015-07-28
  ************************************************************************/
 
-#include <stdio.h>
+#include <stdio.h>		//snprintf printf
 #include <stdlib.h>		//malloc free
-#include <string.h>		//strerror
+#include <string.h>		//strerror memset strncpy
 #include <assert.h>		//assert
 #include <sys/mman.h>	//madvise mmap munmap msync
-#include <unistd.h>		//lseek close write sysconf read
+#include <unistd.h>		//lseek close write sysconf read getpid
 
 #include <sys/stat.h>	//fstat
 #include <fcntl.h>		//O_RDWR O_CREAT S_IRWXU open
@@ -19,16 +19,53 @@
 #include <sys/time.h>	//gettimeofday
 #include "def.h"
 
+
+/*functions declaration*/
+
 static int32_t 
-sea_cached_file_extension( struct FILE_INFO_T *file, struct MMAP_INFO_T *map );
+hash_table_data_compression( const struct VAR_BUF_T *key, struct VAR_BUF_T *res );
+
+static int32_t 
+hash_table_data_uncompression( const struct VAR_BUF_T *key, struct VAR_BUF_T *res );
+
+static uint32_t 
+hash_calculating( const struct VAR_BUF_T *key );
+
+static void 
+dump_header_info( const struct HEADER_INFO_T *header );
+
+static void 
+dump_catalog_info( const struct CATALOG_INFO_T *catalog );
+
+static void 
+dump_entry_info( const struct ENTRY_INFO_T *entry );
 
 static int32_t 
 sea_cached_file_mmap( struct FILE_INFO_T *file, struct MMAP_INFO_T *map );
 
 static int32_t 
-hash_table_data_write( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, int32_t (*compression_callback)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) );
+sea_cached_file_extension( struct FILE_INFO_T *file, struct MMAP_INFO_T *map );
 
+static int32_t
+hash_table_search( const struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, 
+				uint32_t hash_code, int32_t entry_first, const struct ENTRY_INFO_T **entry,
+				uint32_t *hash_collison_count );
 
+static int32_t 
+available_entry_search( struct HEADER_INFO_T *header, struct MMAP_INFO_T *mmap_entry );
+
+static int32_t 
+hash_table_catalog_multiplier( struct HEADER_INFO_T *header, struct MMAP_INFO_T *mmap_catalog, uint32_t catalog_index );
+
+static void
+hash_table_adjust_bucket( struct MMAP_INFO_T *mmap_entry, struct CATALOG_INFO_T *catalog, struct ENTRY_INFO_T *entry, int32_t entry_index );
+
+static int32_t 
+hash_table_data_write( struct HASH_TABLE_T *hash_table, 
+					const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, 
+					int32_t (*compression_callback)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) );
+
+/*functions declaration*/
 
 static int32_t 
 hash_table_data_compression( const struct VAR_BUF_T *key, struct VAR_BUF_T *res )
@@ -169,65 +206,186 @@ dump_entry_info( const struct ENTRY_INFO_T *entry )
 
 
 static int32_t 
-sea_cached_initial( struct SEA_CACHED_T *cached )
+sea_cached_file_mmap( struct FILE_INFO_T *file, struct MMAP_INFO_T *map )
 {
-	assert( NULL != cached );
-	
-	DEBUG( "sea_cached_initial:\n" );	
-	
-	struct FILE_INFO_T *file = cached->file;
-	struct MMAP_INFO_T *mmap = cached->mmap;
+	assert( NULL != file && NULL != map );
 
-	if( SEA_CACHED_OK != sea_cached_file_mmap( file, mmap ) )
+	DEBUG( "sea_cached_file_mmap:\n" );	
+
+	//S_IRUSR  00400 user has read permission
+	//S_IWUSR  00200 user has write permission
+	int32_t fd = open( file->name, O_RDWR|O_CREAT, S_IRUSR|S_IWUSR );
+	if( -1 == fd )
 	{
-		DEBUG( "sea_cached_file_mmap error\n" );
+		DEBUG( "open error:%s\n", strerror(errno) );
+		return SEA_CACHED_ERROR;
 	}
 
-	cached->hash_table = NULL;
+	struct stat st;
+	if( -1 == fstat( fd, &st ) )
+	{
+		DEBUG( "fstat error:%s\n", strerror(errno) );
+		return SEA_CACHED_ERROR;	
+	}
+	DEBUG( "filesize:%d\n", (int)st.st_size );
 
-	int32_t table_number = file->length/sizeof(struct HEADER_INFO_T);	
-	int i = 0 ;
-	for( i = 0; i<table_number; ++i )
-	{		
-		struct HASH_TABLE_T *tmp = (struct HASH_TABLE_T*)malloc(sizeof(struct HASH_TABLE_T));
-		if( NULL == tmp )
-			return SEA_CACHED_ERROR;	
-		memset( tmp, 0, sizeof(struct HASH_TABLE_T) );
-		tmp->header = (struct HEADER_INFO_T *)mmap->base + i;
-		if( NULL == cached->hash_table )
+	if( 0 == st.st_size )
+	{
+		if( -1 == lseek( fd, file->align_size-1, SEEK_SET ) )
 		{
-			tmp->next = NULL;
-			cached->hash_table = tmp;
-		} else {
-			tmp->next = cached->hash_table;
-			cached->hash_table = tmp;		
+			DEBUG( "lseek error:%s\n", strerror(errno) );
+			return SEA_CACHED_ERROR;
 		}
+
+		char nil = 0;
+		int32_t size = write( fd, (void*)&nil, sizeof(char) );
+		DEBUG( "write size:%d\n", size );
+		if( -1 == size )
+		{
+			DEBUG( "write error:%s\n", strerror(errno) );
+			return SEA_CACHED_ERROR;	
+		}
+		file->length = file->align_size;
+	} else {
+		file->length = st.st_size;
 	}
+
+
+	off_t off = 0;
+	void *base = (void*)mmap( NULL, file->length, PROT_READ|PROT_WRITE, MAP_SHARED, fd, off );
+	if( MAP_FAILED == base )
+	{
+		DEBUG( "mmap error:%s\n", strerror(errno) );
+		return SEA_CACHED_ERROR;
+	}
+
+	if( -1 == madvise( base, file->length, MADV_NORMAL ) )
+	{
+		DEBUG( "madvise error:%s\n", strerror(errno) );
+		return SEA_CACHED_ERROR;
+	}
+
+	map->base = base;
+	map->fd = fd;
 
 	return SEA_CACHED_OK;
 }
 
 
-static struct HASH_TABLE_T*
-sea_cached_hash_table_seach( struct HASH_TABLE_T *hash_table, const char *table_name, int32_t size )
+static int32_t 
+sea_cached_file_extension( struct FILE_INFO_T *file, struct MMAP_INFO_T *map )
 {
-	assert( NULL != table_name );
+	assert( NULL != file && NULL != map );
+		
+	DEBUG( "sea_cached_file_extension:\n" );
 
-	DEBUG( "sea_cached_hash_table_seach:\n" );
+	uint32_t length = (file->length/file->align_size+1)*file->align_size;
 
-	while( NULL != hash_table )
+	if( -1 == lseek( map->fd, length-1, SEEK_SET ) )
 	{
-		struct HEADER_INFO_T *header = (struct HEADER_INFO_T *)hash_table->header;
-		if( 0 == strncmp( table_name, header->table_name, size ) )
-			return hash_table;
-		hash_table = hash_table->next;
+		DEBUG( "lseek error:%s\n", strerror(errno) );
+		return SEA_CACHED_ERROR;
 	}
 
-	return NULL;
+	char nil = 0;
+	int32_t size = write( map->fd, (void*)&nil, sizeof(char) );
+	DEBUG( "write size:%d\n", size );
+	if( -1 == size )
+	{
+		DEBUG( "write error:%s\n", strerror(errno) );
+		return SEA_CACHED_ERROR;	
+	}
+
+	off_t off = 0;
+	void *base = (void*)mmap( NULL, length, PROT_READ|PROT_WRITE, MAP_SHARED, map->fd, off );
+	if( MAP_FAILED == base )
+	{
+		DEBUG( "mmap error:%s\n", strerror(errno) );
+		return SEA_CACHED_ERROR;
+	}
+
+	if( -1 == madvise( base, length, MADV_NORMAL ) )
+	{
+		DEBUG( "madvise error:%s\n", strerror(errno) );
+		return SEA_CACHED_ERROR;
+	}
+
+	if( NULL != map->base )
+	{	
+		if ( -1 == msync( map->base, file->length, MS_SYNC ) )
+		{
+			DEBUG( "msync error:%s\n", strerror(errno) );		
+			return SEA_CACHED_ERROR;
+		}
+		
+		if( -1 == munmap( map->base, file->length ) )
+		{
+			DEBUG( "munmap error:%s\n", strerror(errno) );		
+			return SEA_CACHED_ERROR;
+		}
+	}
+
+	map->base = base;
+	file->length = length;
+
+	return SEA_CACHED_OK;
 }
 
 
-static struct HASH_TABLE_T*
+int32_t 
+sea_cached_hash_table_close( const struct SEA_CACHED_T *cached, struct HASH_TABLE_T *hash_table )
+{
+	assert( NULL != cached && NULL != cached->file && NULL != cached->mmap );
+	assert( NULL != hash_table && NULL != hash_table->header );
+
+	DEBUG( "sea_cached_hash_table_close:\n" );
+
+	const struct HEADER_INFO_T *header = hash_table->header;
+	const struct FILE_INFO_T *file[] = { &header->catalog, &header->entry, &header->data };
+	struct MMAP_INFO_T *mmap[] = { &hash_table->catalog, &hash_table->entry, &hash_table->data };
+
+	dump_header_info( header );
+
+	uint32_t i = 0;
+	for( i = 0; i < sizeof(mmap)/sizeof(struct MMAP_INFO_T *); ++i )
+	{
+		if( NULL != (*mmap+i)->base )
+		{	
+			if ( -1 == msync( (*mmap+i)->base, (*file+i)->length, MS_SYNC ) )
+			{
+				DEBUG( "msync error:%s\n", strerror(errno) );		
+				return SEA_CACHED_ERROR;
+			}
+
+			if( -1 == munmap( (*mmap+i)->base, (*file+i)->length ) )
+			{
+				DEBUG( "munmap error:%s\n", strerror(errno) );		
+				return SEA_CACHED_ERROR;
+			}
+
+			close( (*mmap+i)->fd );
+			(*mmap+i)->base = NULL;
+			(*mmap+i)->fd = -1;
+		}
+	}
+	
+	if( NULL != cached->mmap->base )
+	{	
+		if ( -1 == msync( cached->mmap->base, cached->file->length, MS_SYNC ) )
+		{
+			DEBUG( "msync error:%s\n", strerror(errno) );		
+			return SEA_CACHED_ERROR;
+		}
+	}
+	
+	//indicate this hashtable has been closed, shouldn't access again
+	hash_table->flag = SEA_CACHED_HASHTABLE_CLOSE;
+
+	return SEA_CACHED_OK;
+}
+
+
+struct HASH_TABLE_T*
 sea_cached_hash_table_create( struct SEA_CACHED_T *cached, const char *table_name, uint32_t bucket_size )
 {
 	assert( NULL != cached && NULL != cached->file && NULL != cached->mmap && NULL != table_name );
@@ -290,7 +448,7 @@ sea_cached_hash_table_create( struct SEA_CACHED_T *cached, const char *table_nam
 }
 
 
-static int32_t 
+int32_t 
 sea_cached_hash_table_initial( struct HASH_TABLE_T *hash_table )
 {
 	assert( NULL != hash_table && NULL != hash_table->header );
@@ -344,6 +502,109 @@ sea_cached_hash_table_initial( struct HASH_TABLE_T *hash_table )
 
 	if( SEA_CACHED_HASHTABLE_CLOSE == hash_table->flag )
 		hash_table->flag = SEA_CACHED_HASHTABLE_OPEN;
+
+	return SEA_CACHED_OK;
+}
+
+
+struct HASH_TABLE_T*
+sea_cached_hash_table_seach( struct HASH_TABLE_T *hash_table, const char *table_name, int32_t size )
+{
+	assert( NULL != table_name );
+
+	DEBUG( "sea_cached_hash_table_seach:\n" );
+
+	while( NULL != hash_table )
+	{
+		struct HEADER_INFO_T *header = (struct HEADER_INFO_T *)hash_table->header;
+		if( 0 == strncmp( table_name, header->table_name, size ) )
+			return hash_table;
+		hash_table = hash_table->next;
+	}
+
+	return NULL;
+}
+
+
+int32_t 
+sea_cached_initial( struct SEA_CACHED_T *cached )
+{
+	assert( NULL != cached );
+	
+	DEBUG( "sea_cached_initial:\n" );	
+	
+	struct FILE_INFO_T *file = cached->file;
+	struct MMAP_INFO_T *mmap = cached->mmap;
+
+	if( SEA_CACHED_OK != sea_cached_file_mmap( file, mmap ) )
+	{
+		DEBUG( "sea_cached_file_mmap error\n" );
+	}
+
+	cached->hash_table = NULL;
+
+	int32_t table_number = file->length/sizeof(struct HEADER_INFO_T);	
+	int i = 0 ;
+	for( i = 0; i<table_number; ++i )
+	{		
+		struct HASH_TABLE_T *tmp = (struct HASH_TABLE_T*)malloc(sizeof(struct HASH_TABLE_T));
+		if( NULL == tmp )
+			return SEA_CACHED_ERROR;	
+		memset( tmp, 0, sizeof(struct HASH_TABLE_T) );
+		tmp->header = (struct HEADER_INFO_T *)mmap->base + i;
+		if( NULL == cached->hash_table )
+		{
+			tmp->next = NULL;
+			cached->hash_table = tmp;
+		} else {
+			tmp->next = cached->hash_table;
+			cached->hash_table = tmp;		
+		}
+	}
+
+	return SEA_CACHED_OK;
+}
+
+
+int32_t 
+sea_cached_close( struct SEA_CACHED_T *cached )
+{
+	assert( NULL != cached && NULL != cached->file && NULL != cached->mmap );
+
+	DEBUG( "sea_cached_close:\n" );
+	
+	struct HASH_TABLE_T *hash_table = cached->hash_table;
+	while( NULL != hash_table )
+	{
+		if( SEA_CACHED_OK != sea_cached_hash_table_close( cached, hash_table ) )
+		{
+			DEBUG( "sea_cached_hash_table_close error\n" );
+			return SEA_CACHED_ERROR;	
+		}
+
+		struct HASH_TABLE_T *next = hash_table->next;	
+		free( (void*)hash_table );
+		hash_table = next;
+	}
+
+	if( NULL != cached->mmap->base )
+	{	
+		if ( -1 == msync( cached->mmap->base, cached->file->length, MS_SYNC ) )
+		{
+			DEBUG( "msync error:%s\n", strerror(errno) );		
+			return SEA_CACHED_ERROR;
+		}
+		
+		if( -1 == munmap( cached->mmap->base, cached->file->length ) )
+		{
+			DEBUG( "munmap error:%s\n", strerror(errno) );		
+			return SEA_CACHED_ERROR;
+		}
+
+		close( cached->mmap->fd );
+		cached->mmap->base = NULL;
+		cached->mmap->fd = -1;
+	}
 
 	return SEA_CACHED_OK;
 }
@@ -489,6 +750,51 @@ hash_table_adjust_bucket( struct MMAP_INFO_T *mmap_entry, struct CATALOG_INFO_T 
 
 
 static int32_t 
+hash_table_data_write( struct HASH_TABLE_T *hash_table, 
+					const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, 
+					int32_t (*compression_callback)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) )
+{
+	assert( NULL != hash_table );
+	assert( NULL != key && NULL != key->buf );
+	assert( NULL != value );
+	
+	DEBUG( "hash_table_data_write:\n" );
+	
+	struct FILE_INFO_T *data = &hash_table->header->data;	
+	
+	DEBUG( "data->counter.cursor:%d data->length:%d\n",data->counter.cursor, data->length );
+	DEBUG( "key->size:%d value->size:%d\n", key->size, value->size );
+	
+	while( (data->length-data->counter.cursor) < (key->size+value->size) )
+	{
+		//data zone extension
+		if( SEA_CACHED_OK != sea_cached_file_extension( data, &hash_table->data ) )
+		{
+			DEBUG( "sea_cached_file_extension error\n" );
+			return SEA_CACHED_ERROR;
+		}
+	}
+
+	//to do
+	if( 0 )
+	{
+		if( NULL != compression_callback )
+			compression_callback( NULL, NULL );
+		else 
+			hash_table_data_compression( NULL, NULL );
+	}
+
+	struct MMAP_INFO_T *mmap_data = &hash_table->data;
+	if( NULL != key->buf )
+		memcpy( (void*)((char*)mmap_data->base+data->counter.cursor), (void*)key->buf, key->size );
+	if( NULL != value->buf )
+		memcpy( (void*)((char*)mmap_data->base+data->counter.cursor+key->size), (void*)value->buf, value->size );
+
+	return SEA_CACHED_OK;
+}
+
+
+int32_t 
 hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, 
 				uint32_t (*hash_callback)(const struct VAR_BUF_T *key), 
 				int32_t (*compression_callback)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) )
@@ -658,7 +964,7 @@ hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, co
 }
 
 
-static int32_t 
+int32_t 
 hash_table_get( const struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, struct VAR_BUF_T *value,
 				uint32_t (*hash_callback)(const struct VAR_BUF_T *key), 
 				int32_t (*uncompression_callback)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) )
@@ -741,7 +1047,7 @@ hash_table_get( const struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *k
 
 
 /*
-static int32_t 
+int32_t 
 sea_cached_delete( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key )
 {
 	assert( NULL != cached && NULL != cached->header );
@@ -798,345 +1104,4 @@ sea_cached_delete( struct SEA_CACHED_T *cached, const struct VAR_BUF_T *key )
 	return SEA_CACHED_OK;
 }
 */
-
-static int32_t 
-sea_cached_file_extension( struct FILE_INFO_T *file, struct MMAP_INFO_T *map )
-{
-	assert( NULL != file && NULL != map );
-		
-	DEBUG( "sea_cached_file_extension:\n" );
-
-	uint32_t length = (file->length/file->align_size+1)*file->align_size;
-
-	if( -1 == lseek( map->fd, length-1, SEEK_SET ) )
-	{
-		DEBUG( "lseek error:%s\n", strerror(errno) );
-		return SEA_CACHED_ERROR;
-	}
-
-	char nil = 0;
-	int32_t size = write( map->fd, (void*)&nil, sizeof(char) );
-	DEBUG( "write size:%d\n", size );
-	if( -1 == size )
-	{
-		DEBUG( "write error:%s\n", strerror(errno) );
-		return SEA_CACHED_ERROR;	
-	}
-
-	off_t off = 0;
-	void *base = (void*)mmap( NULL, length, PROT_READ|PROT_WRITE, MAP_SHARED, map->fd, off );
-	if( MAP_FAILED == base )
-	{
-		DEBUG( "mmap error:%s\n", strerror(errno) );
-		return SEA_CACHED_ERROR;
-	}
-
-	if( -1 == madvise( base, length, MADV_NORMAL ) )
-	{
-		DEBUG( "madvise error:%s\n", strerror(errno) );
-		return SEA_CACHED_ERROR;
-	}
-
-	if( NULL != map->base )
-	{	
-		if ( -1 == msync( map->base, file->length, MS_SYNC ) )
-		{
-			DEBUG( "msync error:%s\n", strerror(errno) );		
-			return SEA_CACHED_ERROR;
-		}
-		
-		if( -1 == munmap( map->base, file->length ) )
-		{
-			DEBUG( "munmap error:%s\n", strerror(errno) );		
-			return SEA_CACHED_ERROR;
-		}
-	}
-
-	map->base = base;
-	file->length = length;
-
-	return SEA_CACHED_OK;
-}
-
-static int32_t 
-sea_cached_file_mmap( struct FILE_INFO_T *file, struct MMAP_INFO_T *map )
-{
-	assert( NULL != file && NULL != map );
-
-	DEBUG( "sea_cached_file_mmap:\n" );	
-
-	//S_IRUSR  00400 user has read permission
-	//S_IWUSR  00200 user has write permission
-	int32_t fd = open( file->name, O_RDWR|O_CREAT, S_IRUSR|S_IWUSR );
-	if( -1 == fd )
-	{
-		DEBUG( "open error:%s\n", strerror(errno) );
-		return SEA_CACHED_ERROR;
-	}
-
-	struct stat st;
-	if( -1 == fstat( fd, &st ) )
-	{
-		DEBUG( "fstat error:%s\n", strerror(errno) );
-		return SEA_CACHED_ERROR;	
-	}
-	DEBUG( "filesize:%d\n", (int)st.st_size );
-
-	if( 0 == st.st_size )
-	{
-		if( -1 == lseek( fd, file->align_size-1, SEEK_SET ) )
-		{
-			DEBUG( "lseek error:%s\n", strerror(errno) );
-			return SEA_CACHED_ERROR;
-		}
-
-		char nil = 0;
-		int32_t size = write( fd, (void*)&nil, sizeof(char) );
-		DEBUG( "write size:%d\n", size );
-		if( -1 == size )
-		{
-			DEBUG( "write error:%s\n", strerror(errno) );
-			return SEA_CACHED_ERROR;	
-		}
-		file->length = file->align_size;
-	} else {
-		file->length = st.st_size;
-	}
-
-
-	off_t off = 0;
-	void *base = (void*)mmap( NULL, file->length, PROT_READ|PROT_WRITE, MAP_SHARED, fd, off );
-	if( MAP_FAILED == base )
-	{
-		DEBUG( "mmap error:%s\n", strerror(errno) );
-		return SEA_CACHED_ERROR;
-	}
-
-	if( -1 == madvise( base, file->length, MADV_NORMAL ) )
-	{
-		DEBUG( "madvise error:%s\n", strerror(errno) );
-		return SEA_CACHED_ERROR;
-	}
-
-	map->base = base;
-	map->fd = fd;
-
-	return SEA_CACHED_OK;
-}
-
-
-static int32_t 
-sea_cached_hash_table_close( const struct SEA_CACHED_T *cached, struct HASH_TABLE_T *hash_table )
-{
-	assert( NULL != cached && NULL != cached->file && NULL != cached->mmap );
-	assert( NULL != hash_table && NULL != hash_table->header );
-
-	DEBUG( "sea_cached_hash_table_close:\n" );
-
-	const struct HEADER_INFO_T *header = hash_table->header;
-	const struct FILE_INFO_T *file[] = { &header->catalog, &header->entry, &header->data };
-	struct MMAP_INFO_T *mmap[] = { &hash_table->catalog, &hash_table->entry, &hash_table->data };
-
-	dump_header_info( header );
-
-	uint32_t i = 0;
-	for( i = 0; i < sizeof(mmap)/sizeof(struct MMAP_INFO_T *); ++i )
-	{
-		if( NULL != (*mmap+i)->base )
-		{	
-			if ( -1 == msync( (*mmap+i)->base, (*file+i)->length, MS_SYNC ) )
-			{
-				DEBUG( "msync error:%s\n", strerror(errno) );		
-				return SEA_CACHED_ERROR;
-			}
-
-			if( -1 == munmap( (*mmap+i)->base, (*file+i)->length ) )
-			{
-				DEBUG( "munmap error:%s\n", strerror(errno) );		
-				return SEA_CACHED_ERROR;
-			}
-
-			close( (*mmap+i)->fd );
-			(*mmap+i)->base = NULL;
-			(*mmap+i)->fd = -1;
-		}
-	}
-	
-	if( NULL != cached->mmap->base )
-	{	
-		if ( -1 == msync( cached->mmap->base, cached->file->length, MS_SYNC ) )
-		{
-			DEBUG( "msync error:%s\n", strerror(errno) );		
-			return SEA_CACHED_ERROR;
-		}
-	}
-	
-	//indicate this hashtable has been closed, shouldn't access again
-	hash_table->flag = SEA_CACHED_HASHTABLE_CLOSE;
-
-	return SEA_CACHED_OK;
-}
-
-
-
-static int32_t 
-sea_cached_close( struct SEA_CACHED_T *cached )
-{
-	assert( NULL != cached && NULL != cached->file && NULL != cached->mmap );
-
-	DEBUG( "sea_cached_close:\n" );
-	
-	struct HASH_TABLE_T *hash_table = cached->hash_table;
-	while( NULL != hash_table )
-	{
-		if( SEA_CACHED_OK != sea_cached_hash_table_close( cached, hash_table ) )
-		{
-			DEBUG( "sea_cached_hash_table_close error\n" );
-			return SEA_CACHED_ERROR;	
-		}
-
-		struct HASH_TABLE_T *next = hash_table->next;	
-		free( (void*)hash_table );
-		hash_table = next;
-	}
-
-	if( NULL != cached->mmap->base )
-	{	
-		if ( -1 == msync( cached->mmap->base, cached->file->length, MS_SYNC ) )
-		{
-			DEBUG( "msync error:%s\n", strerror(errno) );		
-			return SEA_CACHED_ERROR;
-		}
-		
-		if( -1 == munmap( cached->mmap->base, cached->file->length ) )
-		{
-			DEBUG( "munmap error:%s\n", strerror(errno) );		
-			return SEA_CACHED_ERROR;
-		}
-
-		close( cached->mmap->fd );
-		cached->mmap->base = NULL;
-		cached->mmap->fd = -1;
-	}
-
-	return SEA_CACHED_OK;
-}
-
-
-static int32_t 
-hash_table_data_write( struct HASH_TABLE_T *hash_table, 
-					const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, 
-					int32_t (*compression_callback)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) )
-{
-	assert( NULL != hash_table );
-	assert( NULL != key && NULL != key->buf );
-	assert( NULL != value );
-	
-	DEBUG( "hash_table_data_write:\n" );
-	
-	struct FILE_INFO_T *data = &hash_table->header->data;	
-	
-	DEBUG( "data->counter.cursor:%d data->length:%d\n",data->counter.cursor, data->length );
-	DEBUG( "key->size:%d value->size:%d\n", key->size, value->size );
-	
-	while( (data->length-data->counter.cursor) < (key->size+value->size) )
-	{
-		//data zone extension
-		if( SEA_CACHED_OK != sea_cached_file_extension( data, &hash_table->data ) )
-		{
-			DEBUG( "sea_cached_file_extension error\n" );
-			return SEA_CACHED_ERROR;
-		}
-	}
-
-	//to do
-	if( 0 )
-	{
-		if( NULL != compression_callback )
-			compression_callback( NULL, NULL );
-		else 
-			hash_table_data_compression( NULL, NULL );
-	}
-
-	struct MMAP_INFO_T *mmap_data = &hash_table->data;
-	if( NULL != key->buf )
-		memcpy( (void*)((char*)mmap_data->base+data->counter.cursor), (void*)key->buf, key->size );
-	if( NULL != value->buf )
-	memcpy( (void*)((char*)mmap_data->base+data->counter.cursor+key->size), (void*)value->buf, value->size );
-
-	return SEA_CACHED_OK;
-}
-
-
-int main( int argc, char **argv )
-{
-	//sea_cached_initial
-	struct FILE_INFO_T file;
-	memset( &file, 0, sizeof(struct FILE_INFO_T) );
-	file.align_size = sizeof(struct HEADER_INFO_T);	
-	strncpy( file.name, "./test/cache.cache", sizeof(file.name) );
-
-	struct MMAP_INFO_T mmap;
-	memset( &mmap, 0, sizeof(struct MMAP_INFO_T) );
-	
-	struct SEA_CACHED_T cached;
-	memset( &cached, 0, sizeof(struct SEA_CACHED_T) );
-	cached.file = (struct FILE_INFO_T*)&file;
-	cached.mmap = (struct MMAP_INFO_T*)&mmap;
-
-	if( SEA_CACHED_OK != sea_cached_initial( &cached ) )
-	{
-		DEBUG( "sea_cached_initial error\n" );
-	}
-
-	//sea_cached_hash_table_initial
-	const char *table_name = "./test/test";
-	struct HASH_TABLE_T *hash_table = sea_cached_hash_table_seach( cached.hash_table, table_name, strlen(table_name) );	
-	uint32_t bucket_size = SEA_CACHED_BUCKET_SIZE;
-	if ( NULL == hash_table && NULL == (hash_table = sea_cached_hash_table_create( &cached ,table_name, bucket_size ) ) )
-	{
-		DEBUG( "sea_cached_hash_table_create error\n" );
-	}
-
-	if( SEA_CACHED_OK != sea_cached_hash_table_initial( hash_table ) )
-	{
-		DEBUG( "sea_cached_hash_table_initial error\n" );
-	}
-
-	struct VAR_BUF_T key;
-	struct VAR_BUF_T value;
-	
-	DEBUG( "key: %s value:%s\n", argv[2], argv[1] );
-	const char *buf1 = argv[2];
-	key.buf = (void*)buf1;
-	key.size = strlen(buf1);
-	
-	const char *buf2 = argv[1];
-	value.buf = (void*)buf2;
-	value.size = strlen(buf2);
-
-	struct timeval start;
-	gettimeofday( &start, NULL );
-	hash_table_set( hash_table, &key, &value, NULL, NULL );
-	struct timeval stop;
-	gettimeofday( &stop, NULL );
-
-	DEBUG( "%d us\n", ((int32_t)stop.tv_sec-(int32_t)start.tv_sec)*1000000+(int32_t)stop.tv_usec-(int32_t)start.tv_usec );
-
-	struct VAR_BUF_T res;
-	memset( &res, 0, sizeof(res) );
-	
-	gettimeofday( &start, NULL );
-	hash_table_get( hash_table, &key, &res, NULL, NULL );
-	gettimeofday( &stop, NULL );
-	
-	DEBUG( "%d us\n", ((int32_t)stop.tv_sec-(int32_t)start.tv_sec)*1000000+(int32_t)stop.tv_usec-(int32_t)start.tv_usec );
-	DEBUG( "value size:%d value:%s\n", res.size, (char*)res.buf );
-	if( NULL != res.buf )
-		free( (void*)res.buf );
-
-	sea_cached_close( &cached );
-
-	return 0;
-}
 

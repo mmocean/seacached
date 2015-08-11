@@ -26,7 +26,7 @@ struct CATALOG_INFO_T
 	uint32_t entry_count		:8;		/*[0...n]count of entry*/
 	uint32_t hash_collision		:8;	
 	uint32_t bucket_depth		:16;	/*[n+1...31]locale depth of bucket*/
-	int32_t	 entry_first;			/*chaining to solve a collision*/
+	int32_t	 entry_first;				/*chaining to solve a collision*/
 };
 
 struct ENTRY_INFO_T
@@ -121,5 +121,39 @@ struct SEA_CACHED_T
 #define DEBUG(...)\
 printf("[DEBUG] [%d] [%s:%d] ", getpid(), __FILE__, __LINE__ );\
 printf( __VA_ARGS__ );
+
+
+/*functions declaration*/
+
+int32_t 
+hash_table_set( struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, const struct VAR_BUF_T *value, 
+				uint32_t (*hash_callback)(const struct VAR_BUF_T *key), 
+				int32_t (*compression_callback)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) );
+
+int32_t 
+hash_table_get( const struct HASH_TABLE_T *hash_table, const struct VAR_BUF_T *key, struct VAR_BUF_T *value,
+				uint32_t (*hash_callback)(const struct VAR_BUF_T *key), 
+				int32_t (*uncompression_callback)( const struct VAR_BUF_T *key, struct VAR_BUF_T *res) );
+
+int32_t 
+sea_cached_hash_table_close( const struct SEA_CACHED_T *cached, struct HASH_TABLE_T *hash_table );
+
+struct HASH_TABLE_T*
+sea_cached_hash_table_create( struct SEA_CACHED_T *cached, const char *table_name, uint32_t bucket_size );
+
+int32_t 
+sea_cached_hash_table_initial( struct HASH_TABLE_T *hash_table );
+
+struct HASH_TABLE_T*
+sea_cached_hash_table_seach( struct HASH_TABLE_T *hash_table, const char *table_name, int32_t size );
+
+int32_t 
+sea_cached_initial( struct SEA_CACHED_T *cached );
+
+int32_t 
+sea_cached_close( struct SEA_CACHED_T *cached );
+
+/*functions declaration*/
+
 #endif
 
