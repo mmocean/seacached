@@ -62,6 +62,7 @@ struct HEADER_INFO_T
 	uint32_t catalog_total;	
 	uint32_t entry_index;
 	uint32_t entry_total;
+	uint32_t depth_max;
 
 	struct FILE_INFO_T catalog;
 	struct FILE_INFO_T entry;
@@ -76,6 +77,7 @@ struct MMAP_INFO_T
 
 struct HASH_TABLE_T
 {
+	int32_t flag;
 	struct HEADER_INFO_T *header;	
 	struct MMAP_INFO_T catalog;
 	struct MMAP_INFO_T entry;
@@ -94,13 +96,8 @@ struct SEA_CACHED_T
 #define SEA_CACHED_ERROR			((int32_t)-1)
 
 #define SEA_CACHED_VERSION			((uint32_t)1)
+#define SEA_CACHED_DEPTH_MAXIMUM	((uint32_t)2)
 #define SEA_CACHED_BUCKET_SIZE		((int32_t) 4)	/*default 8*/
-#define SEA_CACHED_CATALOG_MULTIPLE	((int32_t) 1)	/*default 8*/
-
-#define SEA_CACHED_SET_CALL			((int32_t)0x00000001)
-#define SEA_CACHED_GET_CALL			((int32_t)0x00000002)
-#define SEA_CACHED_DELETE_CALL		((int32_t)0x00000004)
-#define SEA_CACHED_UPDATE_CALL		((int32_t)0x00000008)
 
 #define SEA_CACHED_KEY_EXIST		((int32_t)0x00000001)
 #define SEA_CACHED_KEY_NON_EXIST	((int32_t)0x00000002)
@@ -108,9 +105,18 @@ struct SEA_CACHED_T
 #define SEA_CACHED_HASHTABLE_UNUSED ((int32_t)0x00000000)
 #define SEA_CACHED_HASHTABLE_USED	((int32_t)0x00000001)
 
+#define SEA_CACHED_HASHTABLE_CLOSE	((int32_t)0x00000000)
+#define SEA_CACHED_HASHTABLE_OPEN	((int32_t)0x00000001)
+
 #define SEA_CACHED_CATALOG_SUFFIX	(".catalog")
 #define SEA_CACHED_ENTRY_SUFFIX		(".entry")
 #define SEA_CACHED_DATA_SUFFIX		(".data")
+
+#define SEA_CACHED_LOG_DEBUG		((int32_t)0x00000001)
+#define SEA_CACHED_LOG_INFO			((int32_t)0x00000002)
+#define SEA_CACHED_LOG_WARN			((int32_t)0x00000004)
+#define SEA_CACHED_LOG_ERROR		((int32_t)0x00000008)
+#define SEA_CACHED_LOG_FATAL		((int32_t)0x000000016)
 
 #define DEBUG(...)\
 printf("[DEBUG] [%d] [%s:%d] ", getpid(), __FILE__, __LINE__ );\
